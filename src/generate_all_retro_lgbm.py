@@ -135,20 +135,38 @@ class BatchRetrospectiveForecastGenerator:
         
         configurations = []
         
-        # Find all subdirectories in models/saved
-        model_folders = [d for d in os.listdir(models_dir) 
-                        if os.path.isdir(os.path.join(models_dir, d))]
-        
-        for folder_name in sorted(model_folders):
-            folder_path = os.path.join(models_dir, folder_name)
-            
-            # Find all hyperparameter files in this folder
-            hyperparam_files = glob.glob(os.path.join(folder_path, "two_stage_hyperparameters_h*.pkl"))
-            
+        # Find subdirectories (if present)
+        model_folders = [d for d in os.listdir(models_dir) if os.path.isdir(os.path.join(models_dir, d))]
+
+        if model_folders:
+            for folder_name in sorted(model_folders):
+                folder_path = os.path.join(models_dir, folder_name)
+                # Find all hyperparameter files in this folder
+                hyperparam_files = glob.glob(os.path.join(folder_path, "two_stage_hyperparameters_h*.pkl"))
+                for hyperparam_file in sorted(hyperparam_files):
+                    filename = os.path.basename(hyperparam_file)
+                    if 'parameters_h' in filename:
+                        horizon_str = filename.split('parameters_h')[1].split('.pkl')[0]
+                        try:
+                            horizon = int(horizon_str)
+                        except ValueError:
+                            print(f"  Warning: Could not parse horizon from {filename}, skipping")
+                            continue
+                    else:
+                        print(f"  Warning: Could not find 'parameters_h' pattern in {filename}, skipping")
+                        continue
+                    configurations.append({
+                        'folder_name': folder_name,
+                        'hyperparam_file': hyperparam_file,
+                        'horizon': horizon
+                    })
+                    print(f"  Found: {folder_name}/h{horizon}")
+        else:
+            # No subfolders: treat models_dir itself as the folder
+            folder_name = os.path.basename(models_dir.rstrip('/'))
+            hyperparam_files = glob.glob(os.path.join(models_dir, "two_stage_hyperparameters_h*.pkl"))
             for hyperparam_file in sorted(hyperparam_files):
-                # Extract horizon from filename (e.g., "two_stage_hyperparameters_h1.pkl" -> 1)
                 filename = os.path.basename(hyperparam_file)
-                # More precise parsing: look for 'parameters_h' pattern
                 if 'parameters_h' in filename:
                     horizon_str = filename.split('parameters_h')[1].split('.pkl')[0]
                     try:
@@ -159,19 +177,17 @@ class BatchRetrospectiveForecastGenerator:
                 else:
                     print(f"  Warning: Could not find 'parameters_h' pattern in {filename}, skipping")
                     continue
-                
                 configurations.append({
                     'folder_name': folder_name,
                     'hyperparam_file': hyperparam_file,
                     'horizon': horizon
                 })
-                
                 print(f"  Found: {folder_name}/h{horizon}")
         
         print(f"Total configurations found: {len(configurations)}")
         return configurations
         
-    def process_single_configuration(self, config: Dict, output_base_dir: str) -> None:
+    def process_single_configuration(self, config: Dict, output_base_dir: str, models_base_dir: str) -> None:
         """Process a single model configuration and generate forecasts."""
         
         folder_name = config['folder_name']
@@ -202,11 +218,15 @@ class BatchRetrospectiveForecastGenerator:
         # Load models
         stage1_models = {}
         stage2_models = {}
-        
+
         print("Loading trained models...")
         for location in locations:
             # Load Stage 1 model
-            booster_file = f"models/point_mu/{location}_booster.txt"
+            booster_file = os.path.join(models_base_dir, "point_mu", f"{location}_booster.txt")
+            # Try horizon-aware first
+            booster_file_h = os.path.join(models_base_dir, "point_mu", f"{location}_h{horizon}_booster.txt")
+            if os.path.exists(booster_file_h):
+                booster_file = booster_file_h
             if not os.path.exists(booster_file):
                 print(f"  Warning: Stage 1 model not found: {booster_file}, skipping {location}")
                 continue
@@ -214,7 +234,10 @@ class BatchRetrospectiveForecastGenerator:
             stage1_models[location] = lgb.Booster(model_file=booster_file)
             
             # Load Stage 2 model
-            model_file = f"models/scale_sigma/{location}_lgbmlss_model.pkl"
+            model_file = os.path.join(models_base_dir, "scale_sigma", f"{location}_lgbmlss_model.pkl")
+            model_file_h = os.path.join(models_base_dir, "scale_sigma", f"{location}_h{horizon}_lgbmlss_model.pkl")
+            if os.path.exists(model_file_h):
+                model_file = model_file_h
             if not os.path.exists(model_file):
                 print(f"  Warning: Stage 2 model not found: {model_file}, skipping {location}")
                 continue
@@ -590,6 +613,8 @@ def main():
                        help='Directory containing saved models (default: models/saved)')
     parser.add_argument('--output-base', type=str, default='forecasts/retrospective/saved_models',
                        help='Base output directory for forecasts (default: forecasts/retrospective/saved_models)')
+    parser.add_argument('--models-base-dir', type=str, default='models',
+                       help='Base directory for saved models (default: models)')
     
     args = parser.parse_args()
     
@@ -625,7 +650,7 @@ def main():
     for i, config in enumerate(configurations, 1):
         print(f"\n[{i}/{len(configurations)}] ", end="")
         try:
-            generator.process_single_configuration(config, args.output_base)
+            generator.process_single_configuration(config, args.output_base, args.models_base_dir)
         except Exception as e:
             print(f"  ERROR processing {config['folder_name']}/h{config['horizon']}: {str(e)}")
             continue

@@ -199,8 +199,7 @@ class ProspectiveForecastGenerator:
                     X_train_transformed = X_train
                     y_train_transformed = y_train
                 
-                # Train Stage 1 model on all available data
-                # Train Stage 1 model (use transformed data)
+                # Train Stage 1 model on all available data (use transformed data)
                 dtrain1 = lgb.Dataset(X_train_transformed, label=y_train_transformed, params={'verbose': -1})
                 p1 = stage1_params['best_params'].copy()
                 p1['verbose'] = -1
@@ -311,6 +310,28 @@ class ProspectiveForecastGenerator:
                 continue
                 
         return all_forecasts
+
+    def save_trained_models(self, forecasts: Dict, hyperparams: Dict, final_stage1_models: Dict, final_stage2_models: Dict,
+                             models_output_dir: str, horizon: int) -> None:
+        """Persist trained Stage1/Stage2 models to disk under the provided base directory.
+        Layout: {models_output_dir}/point_mu/{location}_h{h}_booster.txt and
+                {models_output_dir}/scale_sigma/{location}_h{h}_lgbmlss_model.pkl
+        """
+        os.makedirs(os.path.join(models_output_dir, 'point_mu'), exist_ok=True)
+        os.makedirs(os.path.join(models_output_dir, 'scale_sigma'), exist_ok=True)
+        import pickle
+        for location in forecasts.keys():
+            if location not in final_stage1_models or location not in final_stage2_models:
+                continue
+            booster_path = os.path.join(models_output_dir, 'point_mu', f'{location}_h{horizon}_booster.txt')
+            final_stage1_models[location].save_model(booster_path)
+
+            sigma_path = os.path.join(models_output_dir, 'scale_sigma', f'{location}_h{horizon}_lgbmlss_model.pkl')
+            with open(sigma_path, 'wb') as f:
+                pickle.dump(final_stage2_models[location], f)
+            
+            # Optional: note presence
+            # print(f"Saved models for {location}: {booster_path}, {sigma_path}")
         
     def format_cdc_flusight(self, forecasts: Dict, model_name: str) -> pd.DataFrame:
         """Convert forecasts to CDC FluSight format."""
@@ -425,6 +446,10 @@ def main():
                        help='Output directory for forecasts (default: forecasts/prospective)')
     parser.add_argument('--model-name', type=str, default='TwoStage-FrozenMu',
                        help='Model name for output files (default: TwoStage-FrozenMu)')
+    parser.add_argument('--save-models', action='store_true',
+                       help='Save trained Stage1/Stage2 models to disk')
+    parser.add_argument('--models-output-dir', type=str, default='models/lgbm_enhanced_t10',
+                       help='Base directory to save models when --save-models is set')
     
     args = parser.parse_args()
     
@@ -458,7 +483,88 @@ def main():
     generator.load_data(args.data_file)
     
     # Generate forecasts
-    forecasts = generator.generate_forecasts()
+    # Generate forecasts and capture trained models to optionally persist
+    # We re-run core logic to harvest the trained model objects without large refactor:
+    # Monkey-patch structures to track trained models per location
+    generator._final_stage1_models = {}
+    generator._final_stage2_models = {}
+
+    # Wrap the original generate_forecasts to record models
+    _orig_generate = generator.generate_forecasts
+    def _wrapped_generate():
+        forecasts_local = {}
+        # repeat core of generate_forecasts with small duplication to expose models
+        # Load data is already called
+        print(f"\nGenerating prospective forecasts...")
+        all_forecasts_local = {}
+        for location in generator.hyperparams.keys():
+            print(f"  Generating forecast for {location}")
+            try:
+                params = generator.hyperparams[location]
+                stage1_params = params['stage1']
+                stage2_params = params['stage2']
+                lags = stage1_params['lags']
+                selected_states = stage1_params['selected_states']
+                use_enhanced = (lags is None)
+                if use_enhanced:
+                    X_train, y_train, _ = create_enhanced_features(generator.data, location, selected_states, end_date=None, horizon=generator.horizon)
+                else:
+                    X_train, y_train, _ = create_features(generator.data, location, selected_states, lags, end_date=None, horizon=generator.horizon)
+                if len(X_train) < 50:
+                    continue
+                if generator.use_log_transform.get(location, False):
+                    X_train_transformed = np.log1p(np.maximum(X_train, 0))
+                    y_train_transformed = np.log1p(np.maximum(y_train, 0))
+                else:
+                    X_train_transformed = X_train
+                    y_train_transformed = y_train
+                dtrain1 = lgb.Dataset(X_train_transformed, label=y_train_transformed, params={'verbose': -1})
+                p1 = stage1_params['best_params'].copy(); p1['verbose'] = -1; p1['verbosity'] = -1
+                final_stage1 = lgb.train(p1, dtrain1, num_boost_round=stage1_params['num_boost_round'], callbacks=[])
+                generator._final_stage1_models[location] = final_stage1
+                mu_predictions = final_stage1.predict(X_train_transformed)
+                init_score = np.column_stack([mu_predictions, np.zeros_like(mu_predictions)]).ravel(order='F')
+                dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score, params={'verbose': -1})
+                final_stage2 = LightGBMLSS(GaussianFrozenLoc())
+                p2 = stage2_params['best_params'].copy(); p2['verbose'] = -1; p2['verbosity'] = -1
+                final_stage2.train(p2, dtrain2, num_boost_round=stage2_params['num_boost_round'])
+                generator._final_stage2_models[location] = final_stage2
+
+                if use_enhanced:
+                    X_pred, _ = create_enhanced_features_for_prediction(generator.data, location, selected_states, anchor_date=generator.last_date, horizon=generator.horizon)
+                else:
+                    X_pred, _ = create_features_for_prediction(generator.data, location, selected_states, lags, anchor_date=generator.last_date, horizon=generator.horizon)
+                if len(X_pred) == 0:
+                    continue
+                if generator.use_log_transform.get(location, False):
+                    X_pred_transformed = np.log1p(np.maximum(X_pred, 0))
+                else:
+                    X_pred_transformed = X_pred
+                mu_pred = final_stage1.predict(X_pred_transformed[-1:])[0]
+                if generator.use_log_transform.get(location, False):
+                    mu_pred = np.expm1(mu_pred)
+                dist_params = final_stage2.predict(X_pred_transformed[-1:], pred_type="parameters")
+                if hasattr(dist_params, 'values'):
+                    dist_params = dist_params.values
+                sigma_pred = dist_params[0, 1] if dist_params.ndim > 1 else dist_params[1]
+                sigma_pred = max(float(sigma_pred), 1e-6)
+                if generator.use_log_transform.get(location, False):
+                    sigma_pred = sigma_pred * mu_pred
+                from scipy.stats import norm
+                qvals = np.array([max(0.0, norm.ppf(q, loc=mu_pred, scale=sigma_pred)) for q in CDC_QUANTILES])
+                target_date = generator.last_date + pd.Timedelta(weeks=generator.horizon)
+                all_forecasts_local[location] = {
+                    'forecast_date': generator.last_date,
+                    'target_date': target_date,
+                    'mu': mu_pred,
+                    'sigma': sigma_pred,
+                    'quantile_forecasts': qvals
+                }
+            except Exception as e:
+                continue
+        return all_forecasts_local
+
+    forecasts = _wrapped_generate()
     
     if len(forecasts) == 0:
         print("\nError: No forecasts were generated. Check your data and models.")
@@ -466,6 +572,11 @@ def main():
     
     # Save results
     forecast_file = generator.save_forecasts(forecasts, args.output, args.model_name)
+
+    # Optionally save trained models for reuse
+    if args.save_models and len(forecasts) > 0:
+        generator.save_trained_models(forecasts, generator.hyperparams, generator._final_stage1_models, generator._final_stage2_models,
+                                      args.models_output_dir, generator.horizon)
     
     print(f"\n{'='*80}")
     print(f"PROSPECTIVE FORECASTING COMPLETE")

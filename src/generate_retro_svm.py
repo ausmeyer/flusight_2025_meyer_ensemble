@@ -423,16 +423,16 @@ class SVMForecaster:
 
             print(f"  Generated {len([f for f in all_forecasts if f['location'] == location])} forecasts")
 
-        # Convert to CDC FluSight format
-        print(f"\nConverting to CDC FluSight format...")
+        # Convert to CDC FluSight format (standard 8-column schema)
+        print(f"\nConverting to CDC FluSight format (standardized)...")
         cdc_df = self.format_cdc_flusight(all_forecasts)
 
-        # Save SVM forecasts
+        # Save SVM forecasts (standardized)
         output_file = os.path.join(output_dir, f"svm_retrospective_h{self.horizon}.csv")
         cdc_df.to_csv(output_file, index=False)
-        print(f"Saved SVM forecasts to: {output_file}")
+        print(f"Saved standardized SVM forecasts to: {output_file}")
 
-        # Print summary statistics
+        # Print summary statistics (non-schema-dependent)
         self.print_summary(cdc_df)
 
         # Generate baseline if requested (only for the current horizon)
@@ -440,7 +440,13 @@ class SVMForecaster:
             self.generate_baseline_forecasts(train_df, test_df, output_dir, max_weeks, horizon=self.horizon)
 
     def format_cdc_flusight(self, forecasts: List[Dict]) -> pd.DataFrame:
-        """Convert forecasts to CDC FluSight format."""
+        """Convert forecasts to standardized CDC FluSight format (8 columns).
+        Columns: reference_date, horizon, target, target_end_date, location,
+                 output_type, output_type_id, value
+        - target is fixed to 'wk inc flu hosp'
+        - horizon is zero-based (h-1), consistent with other generators
+        - Only quantile rows are produced (no 'point' rows)
+        """
 
         # State name to FIPS code mapping
         state_to_fips = {
@@ -472,33 +478,18 @@ class SVMForecaster:
             # Get FIPS code
             fips_code = state_to_fips.get(location, location)
 
-            # Add quantile forecasts
+            # Add quantile forecasts only
             for q_idx, q in enumerate(self.quantiles):
                 cdc_records.append({
                     'reference_date': reference_date.strftime('%Y-%m-%d'),
-                    'target': f'{horizon} wk ahead inc hosp',
-                    'horizon': horizon,
+                    'horizon': horizon - 1,
+                    'target': 'wk inc flu hosp',
                     'target_end_date': target_date.strftime('%Y-%m-%d'),
                     'location': fips_code,
-                    'location_name': location,
-                    'type': 'quantile',
-                    'quantile': q,
-                    'value': quantile_forecasts[q_idx]
+                    'output_type': 'quantile',
+                    'output_type_id': q,
+                    'value': float(quantile_forecasts[q_idx])
                 })
-
-            # Add point forecast (median)
-            median_idx = np.where(self.quantiles == 0.5)[0][0]
-            cdc_records.append({
-                'reference_date': reference_date.strftime('%Y-%m-%d'),
-                'target': f'{horizon} wk ahead inc hosp',
-                'horizon': horizon,
-                'target_end_date': target_date.strftime('%Y-%m-%d'),
-                'location': fips_code,
-                'location_name': location,
-                'type': 'point',
-                'quantile': None,
-                'value': quantile_forecasts[median_idx]
-            })
 
         return pd.DataFrame(cdc_records)
 
@@ -511,7 +502,10 @@ class SVMForecaster:
 
         # Summary by location
         print("\nForecasts by location:")
-        location_counts = df.groupby('location_name')['reference_date'].nunique()
+        if 'location' in df.columns:
+            location_counts = df.groupby('location')['reference_date'].nunique()
+        else:
+            location_counts = pd.Series(dtype=int)
         for loc, count in location_counts.items():
             print(f"  {loc}: {count} reference dates")
 
@@ -520,8 +514,8 @@ class SVMForecaster:
         print(f"\nReference date range: {ref_dates.min()} to {ref_dates.max()}")
 
         # Total forecasts
-        n_forecasts = len(df[df['type'] == 'point'])
-        print(f"Total point forecasts generated: {n_forecasts}")
+        n_quantiles = len(df[df['output_type'] == 'quantile']) if 'output_type' in df.columns else len(df)
+        print(f"Total quantile rows generated: {n_quantiles}")
 
 
 def main():

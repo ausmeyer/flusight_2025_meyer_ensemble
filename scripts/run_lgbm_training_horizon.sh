@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Ensure we run from the repository root regardless of invocation path
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
 set -euo pipefail
 
 # Usage: ./run_horizon.sh <HORIZON>

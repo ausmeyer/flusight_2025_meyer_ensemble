@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Ensure we run from the repository root regardless of invocation path
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
 # Run SVM forecasting pipeline on all locations
 # for horizons 1-4 with 25 trials and 10 features
 

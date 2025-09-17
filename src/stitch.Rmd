@@ -41,16 +41,20 @@ download_ilinet_data <- function(years = NULL) {
 }
 
 # Define all input and output file names
+# Automatically set the "as-of" date to the most recent Saturday prior to run time
+as_of_date <- lubridate::floor_date(Sys.Date(), unit = "week", week_start = 7)
+as_of_str  <- format(as_of_date, "%Y-%m-%d")
+
 file_names <- list(
   population = '../data/locations.csv',                   # Population data by location
   hospitalization = '../data/eip_cleaned.csv',            # Cleaned hospitalization data
   old_true_hosp_1 = '../data/old_true_hosp_1.csv',        # Historical true hospitalization data through 2023
   old_true_hosp_2 =  '../data/old_true_hosp_2.csv',       # Historical true hospitalization data through 2024
   output_predicted = 'predicted_hosp.csv',                # Output file for predicted hospitalizations
-  ili_output = '../data/ili/ilinet_2025-09-13.csv',                                    # Output ILINet
-  ed_output = '../data/ed/ed_2025-09-13.csv',                                          # Output ILINet
-  output_final_save = '../data/imputed_sets/imputed_and_stitched_hosp_2025-09-13.csv',
-  output_final = '../data/imputed_sets/imputed_and_stitched_hosp.csv'                  # Output file
+  ili_output = paste0('../data/ili/ilinet_', as_of_str, '.csv'),   # Output ILINet
+  ed_output  = paste0('../data/ed/ed_', as_of_str, '.csv'),        # Output ED scaling factors
+  output_final_save = paste0('../data/imputed_sets/imputed_and_stitched_hosp_', as_of_str, '.csv'),
+  output_final = '../data/imputed_sets/imputed_and_stitched_hosp.csv'                  # Output file (rolling)
 )
 
 # Define function to transform data using bestNormalize

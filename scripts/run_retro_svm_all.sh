@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Ensure we run from the repository root regardless of invocation path
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
 # Generate retrospective forecasts for all trained models
 # This script should be run after run_svm_pipeline.sh completes
 
@@ -53,7 +57,7 @@ for HORIZON in 1 2 3 4; do
     BASELINE_FLAG="--include-baseline"
 
     # Build command with optional max-weeks
-    CMD="python src/generate_retrospective_forecasts.py \
+    CMD="python src/generate_retro_svm.py \
         --hyperparams \"$HYPERPARAMS_FILE\" \
         --data-file \"$DATA_FILE\" \
         --cut-off \"$CUTOFF_DATE\" \
