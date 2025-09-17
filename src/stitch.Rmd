@@ -1,0 +1,460 @@
+---
+title: "Stitch_ILInet"
+author: "Austin Meyer"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load required libraries
+library(zoo)
+library(tidyverse)
+library(MMWRweek)
+library(lubridate)
+library(caret)
+library(kableExtra)
+library(bestNormalize)
+library(httr)
+library(jsonlite)
+library(cdcfluview)
+library(RSocrata)
+
+download_ilinet_data <- function(years = NULL) {
+  # Download national data
+  national_data <- ilinet(region = "national", years = years)
+  
+  # Download data for all states
+  state_data <- ilinet(region = "state", years = years)
+  
+  # Combine national and state data
+  combined_data <- bind_rows(
+    national_data %>% mutate(region_type = "National"),
+    state_data %>% mutate(region_type = "State")
+  )
+  
+  # Add a column for the data source
+  combined_data <- combined_data %>%
+    mutate(data_source = "ILINet")
+  
+  return(combined_data)
+}
+
+# Define all input and output file names
+file_names <- list(
+  population = '../data/locations.csv',                   # Population data by location
+  hospitalization = '../data/eip_cleaned.csv',            # Cleaned hospitalization data
+  old_true_hosp_1 = '../data/old_true_hosp_1.csv',        # Historical true hospitalization data through 2023
+  old_true_hosp_2 =  '../data/old_true_hosp_2.csv',       # Historical true hospitalization data through 2024
+  output_predicted = 'predicted_hosp.csv',                # Output file for predicted hospitalizations
+  ili_output = '../data/ili/ilinet_2025-09-13.csv',                                    # Output ILINet
+  ed_output = '../data/ed/ed_2025-09-13.csv',                                          # Output ILINet
+  output_final_save = '../data/imputed_sets/imputed_and_stitched_hosp_2025-09-13.csv',
+  output_final = '../data/imputed_sets/imputed_and_stitched_hosp.csv'                  # Output file
+)
+
+# Define function to transform data using bestNormalize
+transformed <- function(x) {
+  bn <- bestNormalize(x)
+  return(bn$x.t)
+}
+
+# Load population data
+population <- read_csv(file_names$population) %>%
+  dplyr::select(location_name, population)
+
+cdc.locations.file <- read.csv(file = "https://raw.githubusercontent.com/cdcepi/FluSight-forecast-hub/main/auxiliary-data/locations.csv") |>
+  dplyr::select(1:4)
+```
+
+## Pull Data
+```{r}
+# Load and process ILINet data
+df.ilinet <- download_ilinet_data() %>%
+  mutate(location_name = region, 
+         ili = unweighted_ili, 
+         date = MMWRweek2Date(MMWRyear = year, MMWRweek = week, MMWRday = 7)) %>%
+  dplyr::select(date, location_name, ili) %>%
+  drop_na() %>%
+  group_by(location_name) %>%
+  mutate(ili = transformed(ili + 1)) %>%
+  ungroup() %>%
+  drop_na() %>%
+  filter(!(location_name %in% c('Virgin Islands'))) |>
+  mutate(location_name = ifelse(location_name == 'National', 'US', location_name))
+
+write_csv(df.ilinet, file = file_names$ili_output)
+
+# Load and process hospitalization data
+df.hosp <- read_csv(file_names$hospitalization) %>%
+  filter(`AGE CATEGORY` == 'Overall' &
+           `SEX CATEGORY` == 'Overall' &
+           `RACE CATEGORY` == 'Overall') %>%
+  mutate(location_name = ifelse(CATCHMENT == 'Entire Network', 'US', CATCHMENT),
+         `WEEKLY RATE` = as.numeric(ifelse(`WEEKLY RATE` == 'null', 0, `WEEKLY RATE`))) %>%
+  mutate(hosp = log(`WEEKLY RATE` + 1),
+         date = MMWRweek2Date(MMWRyear = `MMWR-YEAR`, MMWRweek = `MMWR-WEEK`, MMWRday = 7)) %>%
+  filter(date <= mdy('06/30/2019')) %>%
+  dplyr::select(date, location_name, hosp) %>%
+  filter(!(location_name %in% c('Virgin Islands')))
+```
+
+## Merge Data
+```{r}
+# Combine ILINet and hospitalization data
+df.combined <- df.hosp %>% 
+  full_join(df.ilinet, by = c('date', 'location_name')) %>%
+  filter(!(location_name %in% c('Virgin Islands')))
+```
+
+## Plot Example
+```{r, fig.align='center', fig.width = 9, fig.height = 3.5}
+# Prepare data for plotting
+df.plot <- df.combined %>%
+  drop_na() %>%
+  pivot_longer(-c(date, location_name))
+
+# Create time series plot
+p1 <- df.plot %>%
+  ggplot(aes(date, value, color = name)) +
+  geom_line(alpha = 0.6) + 
+  facet_wrap(~location_name, ncol = 5, scales = 'free_y') + 
+  theme_bw() +
+  scale_color_manual(name = NULL, values = c(hosp = 'black', ili = 'red')) +
+  theme(legend.position = 'top',
+        legend.justification = 'right',
+        legend.text = element_text(size = 9),
+        legend.box.spacing = unit(0, "pt"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+show(p1)
+```
+
+```{r, fig.align='center', fig.width = 9, fig.height = 9}
+# Create scatter plot of ILI vs hospitalizations
+p2 <- ggplot(df.plot %>% pivot_wider(names_from = name, values_from = value) %>% drop_na(),
+             aes(ili, hosp, color = location_name, fill = location_name)) +
+  geom_point(alpha = 0.6) + 
+  xlab('Normalized Unweighted ILI percentage') +
+  ylab('Log(Hospitalizations + 1)') +
+  theme_bw(18) +
+  scale_color_discrete(name = NULL) +
+  scale_fill_discrete(name = NULL) +
+  theme(legend.position = "top")
+  
+show(p2)
+```
+
+```{r, fig.align='center', fig.width = 9, fig.height = 3.5}
+# Create faceted scatter plot
+p3 <- ggplot(df.plot %>% pivot_wider(names_from = name, values_from = value) %>% drop_na(),
+             aes(ili, hosp)) +
+  geom_point(alpha = 0.5) + 
+  facet_wrap(~location_name, ncol = 5) + 
+  xlab('Normalized Unweighted ILI percentage') +
+  ylab('Log(Hospitalizations + 1)') +
+  theme_bw()
+  
+show(p3)
+
+#ggsave(plot = p3, 'model_scatter.png', width = 9, height = 3.5, dpi = 300)
+#ggsave(plot = p3, 'model_scatter.pdf', width = 9, height = 3.5)
+```
+
+## Make Regression Models
+```{r}
+# Create linear regression models for each location
+df.models <- df.combined %>% 
+  drop_na() %>%
+  mutate(location = location_name) |>
+  select(-location_name) |>
+  group_by(location) %>% 
+  do({model = lm(hosp ~ ili, data = .);
+       data.frame(intercept = round(coef(model)[1], digits = 2),
+                  slope = round(coef(model)[2], digits = 2),
+                  `p-value` = summary(model)$coefficients[2,4],
+                  `R^2` = round(summary(model)$r.squared, digits = 2))})
+
+# Display model results in a table
+t1 <- df.models %>%
+  kbl() %>%
+  kable_paper('striped', 
+              full_width = F,
+              html_font = 'sans-serif')
+
+save_kable(t1, file = "fit_summary.pdf")
+
+t1
+```
+
+## Combined Model
+```{r}
+# Create a combined linear regression model
+df.final <- df.plot %>% pivot_wider(names_from = name, values_from = value) %>% drop_na()
+
+mod <- lm(hosp ~ ili, df.final)
+
+summary(mod)
+```
+
+## Output Predicted Hospitalizations for Plotting
+```{r, eval = F}
+# Prepare ILINet data for prediction
+tmp.ilinet <- download_ilinet_data() %>%
+  mutate(location_name = region, 
+         ili = unweighted_ili, 
+         date = MMWRweek2Date(MMWRyear = year, MMWRweek = week, MMWRday = 7)) %>%
+  dplyr::select(date, location_name, ili) %>%
+  drop_na() %>%
+  group_by(location_name) %>%
+  mutate(ili = transformed(ili + 1)) %>%
+  ungroup() %>%
+  drop_na() %>%
+  filter(!(location_name %in% c('Virgin Islands')))
+
+# Predict hospitalizations using the combined model
+tmp.predicted.hosp <- bind_cols(tmp.ilinet, pred_hosp = round(exp(predict(mod, tmp.ilinet)) - 1, digits = 2)) %>%
+  mutate(pred_hosp = ifelse(pred_hosp < 0, 0, pred_hosp))
+
+#write_csv(tmp.predicted.hosp, file = file_names$output_predicted)
+```
+
+## Make Historical Time Series
+```{r, fig.align='center', fig.width = 9, fig.height = 40}
+df.ilinet <- df.ilinet %>%
+  pivot_wider(names_from = location_name, values_from = ili) %>%
+  fill(everything(), .direction = "down") %>%
+  pivot_longer(cols = -date, 
+               names_to = "location_name", 
+               values_to = "ili") %>%
+  arrange(location_name, date) 
+
+# Prepare predicted hospitalization data
+predicted.hosp <- bind_cols(df.ilinet, pred_hosp = round(exp(predict(mod, df.ilinet)) - 1, digits = 2)) %>%
+  mutate(pred_hosp = ifelse(pred_hosp < 0, 0, pred_hosp))
+
+# Create historical time series plot
+p4 <- ggplot(predicted.hosp, aes(date, pred_hosp)) + 
+  geom_line() +
+  facet_wrap(~location_name, ncol = 3, scale = 'free_y') +
+  theme_bw()
+
+show(p4)
+```
+
+## Pull fractional influenza in ED visits
+```{r, echo = F}
+# API endpoint URL
+url <- "https://data.cdc.gov/resource/rdmq-nq56.json"
+
+# Function to retrieve data with limit and offset
+get_data <- function(limit, offset, max_retries = 5, retry_delay = 5) {
+  query <- paste0(url, "?$limit=", limit, "&$offset=", offset)
+  
+  for (attempt in 1:max_retries) {
+    tryCatch({
+      response <- GET(query)
+      
+      if (status_code(response) == 200) {
+        data <- fromJSON(content(response, "text"), flatten = TRUE)
+        return(if (length(data) == 0) NULL else data)
+      } else if (status_code(response) == 503) {
+        warning(paste("Attempt", attempt, "- Server unavailable (503). Retrying in", retry_delay, "seconds..."))
+        Sys.sleep(retry_delay)
+      } else {
+        stop("Error in API request: ", status_code(response))
+      }
+    }, error = function(e) {
+      warning(paste("Attempt", attempt, "- Error:", e$message, "Retrying in", retry_delay, "seconds..."))
+      Sys.sleep(retry_delay)
+    })
+  }
+  
+  stop("Max retries reached. Unable to retrieve data.")
+}
+
+# Function to retrieve all data
+get_all_data <- function(limit = 3300, initial_offset = 0, max_retries = 5, retry_delay = 5) {
+  offset <- initial_offset
+  all_data <- data.frame()
+  batch_count <- 0
+  
+  repeat {
+    cat(paste("Fetching batch:", batch_count + 1, "Offset:", offset, "\n"))
+    
+    data_batch <- get_data(limit, offset, max_retries, retry_delay)
+    
+    if (is.null(data_batch)) {
+      break
+    }
+    
+    all_data <- bind_rows(all_data, data_batch)
+    
+    batch_count <- batch_count + 1
+    cat(paste("Rows retrieved:", nrow(data_batch), "\n"))
+    
+    offset <- offset + limit
+    
+    if (nrow(data_batch) < limit) {
+      break
+    }
+    
+    Sys.sleep(0.1)  # Increased delay between requests to be more considerate to the server
+  }
+  
+  cat(paste("Total batches:", batch_count, "Total rows:", nrow(all_data), "\n"))
+  return(all_data)
+}
+
+all_data <- get_all_data()
+
+print(paste("Total rows retrieved:", nrow(all_data)))
+
+# Process retrieved data
+df.ed <- all_data %>%
+  mutate(date = as_date(week_end),
+         location_name = geography) %>%
+  mutate(location_name = ifelse(location_name == 'United States', 'US', location_name)) %>%
+  filter(date > mdy('04/27/2024') &
+           county == 'All') %>%
+  select(date, location_name, percent_visits_combined, percent_visits_covid, 
+         percent_visits_influenza, percent_visits_rsv) %>%
+  mutate(scale_factor = as.numeric(percent_visits_influenza)/as.numeric(percent_visits_combined)) %>%
+  select(date, location_name, scale_factor) %>%
+  full_join(predicted.hosp %>% filter(date > mdy('04/27/2024')), by = c('date', 'location_name')) %>%
+  arrange(location_name, date) %>%
+  fill(everything(), .direction = "down") %>%
+  select(-ili, -pred_hosp)
+
+write_csv(df.ed, file = file_names$ed_output)
+```
+
+## Pull new NHSN data
+```{r}
+fetch_flu <- function() {
+  
+  #read data from data.cdc.gov, filtering for when flu reporting became mandatory
+  health_data = RSocrata::read.socrata(url = "https://data.cdc.gov/resource/mpgq-jmmr.json") %>% 
+    dplyr::filter(weekendingdate >= as.Date("2024-05-01"))
+  
+  #remove  VI and AS as they are not included for FluSight, keep only necessary vars and add epiweek and epiyear 
+  recent_data = health_data %>% 
+    dplyr::filter(!jurisdiction %in% c("VI", "AS", "GU", "MP")) %>% 
+    dplyr::select(jurisdiction, weekendingdate, totalconfflunewadm) %>% 
+    dplyr::rename("value" = "totalconfflunewadm", "date"="weekendingdate", "state"="jurisdiction") %>% 
+    dplyr::mutate(date = as.Date(date), 
+                  value = as.numeric(value),
+                  state = str_replace(state, "USA", "US"))
+  
+  #bind state population data
+  full_data = dplyr::left_join(recent_data, cdc.locations.file, by = join_by("state" == "abbreviation"))
+
+  # Drop rows with missing location_name, group and interpolate non-numeric/NA values in `value`
+  full_data <- full_data %>%
+    dplyr::filter(!is.na(location_name)) %>%
+    dplyr::arrange(location_name, date) %>%
+    dplyr::group_by(location_name) %>%
+    dplyr::mutate(value = zoo::na.approx(value, x = as.numeric(date), na.rm = FALSE)) %>%
+    dplyr::ungroup()
+  
+  #calculates weekly rate 
+  final_dat <- full_data %>% 
+    left_join(population, by = c("location_name")) %>%
+    dplyr::mutate(weekly_rate = (value*100000)/population) %>% 
+    select(date, location, location_name, value, weekly_rate)
+  
+  return(final_dat)
+}
+
+most_recent_flu <- fetch_flu() |>
+  mutate(total_hosp = value) |>
+  select(date, location_name, total_hosp)
+```
+
+
+## Compare To Current Data
+```{r, fig.align='center', fig.width = 9, fig.height = 30}
+interpolate_internal <- function(y, x) {
+  # Perform spline interpolation (includes extrapolation)
+  spline_values <- na.spline(y, x = x)
+  
+  # Use na.approx() to identify internal NAs (without extrapolation)
+  internal_nas <- is.na(na.approx(y, x = x, na.rm = FALSE))
+  
+  # Set extrapolated values to NA
+  spline_values[internal_nas] <- NA
+  
+  return(spline_values)
+}
+
+# Load and process historical hospitalization data
+df.old.true.hosp <- read_csv(file_names$old_true_hosp_1) %>%
+  filter(date >= mdy('07/01/2021') & date <  mdy('06/01/2022')) %>%
+  mutate(true_hosp = value) %>%
+  select(-value, -location)
+
+# Load and process current hospitalization data
+df.true.hosp <- read_csv(file_names$old_true_hosp_2) %>%
+  filter(date >= mdy('06/01/2022')) %>%
+  mutate(true_hosp = value) %>%
+  select(-'...1', -value, -location, -weekly_rate) %>%
+  full_join(df.old.true.hosp)
+
+# Combine predicted and true hospitalization data
+df.combined.hosp <- predicted.hosp %>% 
+  filter(date <= mdy('06/30/2019')) %>%
+  mutate(date = date + days(728)) %>%
+  full_join(df.true.hosp, by = c('date', 'location_name')) %>%
+  full_join(predicted.hosp %>% filter(date > max(df.true.hosp$date))) %>%
+  full_join(df.ed, by = c('date', 'location_name')) %>%
+  mutate(scale_factor = ifelse(is.na(scale_factor), 1, scale_factor)) %>%
+  inner_join(population, by = 'location_name') %>%
+  mutate(prelim_hosp = round(coalesce(pred_hosp * population / 100000, true_hosp))) %>%
+  mutate(total_hosp = round(prelim_hosp * scale_factor)) %>%
+  #mutate(total_hosp = round(prelim_hosp)) |>
+  filter(date < mdy('05/01/2024')) |>
+  bind_rows(most_recent_flu) |>
+  arrange(location_name, date) %>%
+  filter(location_name != 'Virgin Islands') |>
+  group_by(location_name) |>
+  complete(date = seq(min(date), max(date), by = "week")) |>
+  mutate(total_hosp = interpolate_internal(total_hosp, as.numeric(date))) |>
+  mutate(total_hosp = ifelse(total_hosp < 0, 0, total_hosp)) |>
+  ungroup()
+
+# Sanity check for date differences
+sanity <- df.combined.hosp %>% 
+  arrange(location_name, date) %>% 
+  group_by(location_name) %>% 
+  mutate(diffs = difftime(date , lag(date, 1)))
+unique(sanity$diffs)
+
+# Create plot of combined hospitalization data
+p5 <- ggplot(df.combined.hosp, aes(date, total_hosp)) + 
+  geom_point(size = 1.1, alpha = 0.3) +
+  geom_line(alpha = 0.5) +
+  facet_wrap(~location_name, ncol = 3, scales = 'free_y') +
+  theme_bw()
+
+show(p5)
+```
+
+## Output Stitched Time Series
+```{r}
+# Save combined hospitalization data
+#write_csv(df.combined.hosp, file_names$output_final)
+write_csv(df.combined.hosp, file_names$output_final_save)
+```
+
+## Compare To Current Data
+```{r, fig.align='center', fig.width = 9, fig.height = 30}
+df.combined.hosp <- read_csv(file_names$output_final_save)
+# Create plot of recent hospitalization data
+p6 <- ggplot(df.combined.hosp %>% filter(date >= mdy('06/01/2023')), aes(date, total_hosp)) + 
+  geom_point(size = 1.1, alpha = 0.3) +
+  geom_line(alpha = 0.5) +
+  facet_wrap(~location_name, ncol = 3, scales = 'free_y') +
+  theme_bw()
+
+show(p6)
+```
