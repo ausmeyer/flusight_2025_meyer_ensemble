@@ -529,7 +529,7 @@ def main():
                        help='Path to input data file')
     parser.add_argument('--cut-off', type=str, required=True,
                        help='Cut-off date for training (YYYY-MM-DD)')
-    parser.add_argument('--output', type=str, default='forecasts/retrospective/svm',
+    parser.add_argument('--output', type=str, default='forecasts/retrospective/svm_t100',
                        help='Output directory for forecasts')
     parser.add_argument('--max-weeks', type=int, default=None,
                        help='Maximum number of weeks to forecast (default: all test weeks)')

@@ -34,8 +34,8 @@ bash scripts/run_weekly.sh \
 
 - Stitched data: `data/imputed_sets/imputed_and_stitched_hosp_<YYYY-MM-DD>.csv`
 - Retrospective forecasts (CDC-style, quantiles only):
-  - `forecasts/retrospective/saved_models/arima/ARIMA_h{1..4}_forecasts.csv`
-  - `forecasts/retrospective/saved_models/lgbm_enhanced_t10/TwoStage-FrozenMu_h{1..4}_forecasts.csv`
+  - `forecasts/retrospective/arima/ARIMA_h{1..4}_forecasts.csv`
+  - `forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h{1..4}_forecasts.csv`
   - `forecasts/retrospective/svm_retrospective_h{1..4}.csv`
 - Prospective forecasts (CDC-style, quantiles only):
   - `forecasts/prospective/ARIMA_h{1..4}_prospective_<YYYYMMDD>.csv`

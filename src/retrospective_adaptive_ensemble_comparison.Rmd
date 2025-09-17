@@ -276,15 +276,15 @@ calculate_adaptive_weights <- function(model_forecasts_list, actual_data,
 
 ```{r create-adaptive-ensemble}
 # Now load and create adaptive ensemble for saved models
-saved_models_dir <- "retrospective/saved_models"
-model_folders <- list.dirs(saved_models_dir, full.names = TRUE, recursive = FALSE)
+model_base_dir <- "retrospective"
+model_folders <- list.dirs(model_base_dir, full.names = TRUE, recursive = FALSE)
 
 # Conditionally include ARIMA based on configuration
 if (!INCLUDE_ARIMA) {
   model_folders <- model_folders[!grepl("arima", basename(model_folders), ignore.case = TRUE)]
-  cat(sprintf("\nFound %d model folders in saved_models directory (ARIMA excluded)\n", length(model_folders)))
+  cat(sprintf("\nFound %d model folders in retrospective directory (ARIMA excluded)\n", length(model_folders)))
 } else {
-  cat(sprintf("\nFound %d model folders in saved_models directory (ARIMA included)\n", length(model_folders)))
+  cat(sprintf("\nFound %d model folders in retrospective directory (ARIMA included)\n", length(model_folders)))
 }
 
 # Store weight history for reporting

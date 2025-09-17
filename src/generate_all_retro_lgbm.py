@@ -1,15 +1,15 @@
 #!/usr/bin/env python
 """
-Generate retrospective out-of-sample forecasts for all saved models.
+Generate retrospective out-of-sample forecasts for models.
 
-This script processes all trained models in models/saved/* directories and generates
+This script processes trained models in a models directory and generates
 probabilistic forecasts in CDC FluSight format for each model configuration.
 
 Key Features:
-- Processes all model folders in models/saved/
+- Processes all model folders in the provided models directory
 - Extracts horizon from hyperparameter filenames
 - Generates forecasts for each model/horizon combination
-- Outputs to forecasts/retrospective/saved_models/{model_folder}/
+- Outputs to forecasts/retrospective/{model_folder}/
 - Creates both model and baseline forecasts
 - No summary statistics (unlike the single model script)
 
@@ -128,8 +128,8 @@ class BatchRetrospectiveForecastGenerator:
         print(f"Cut-off date: {self.cut_off_date.strftime('%Y-%m-%d')}")
         print(f"Validation period: {val_weeks} weeks from {self.cut_off_date.strftime('%Y-%m-%d')} onwards")
         
-    def find_model_configurations(self, models_dir: str = "models/saved") -> List[Dict]:
-        """Find all model configurations in the saved models directory."""
+    def find_model_configurations(self, models_dir: str = "models") -> List[Dict]:
+        """Find all model configurations in the models directory."""
         
         print(f"\nSearching for model configurations in {models_dir}/")
         
@@ -246,6 +246,57 @@ class BatchRetrospectiveForecastGenerator:
                 stage2_models[location] = pickle.load(f)
         
         print(f"Loaded models for {len(stage1_models)} locations")
+        
+        # If models are not available on disk, train from hyperparameters using training data
+        if len(stage1_models) == 0 or len(stage2_models) == 0:
+            print("No pre-trained models found on disk. Training from hyperparameters...")
+            train_data = self.data[self.data['date'] < self.cut_off_date]
+            train_end_date = train_data['date'].max() if len(train_data) > 0 else self.cut_off_date
+            for location in locations:
+                try:
+                    params = hyperparams[location]
+                    stage1_params = params['stage1']
+                    stage2_params = params['stage2']
+                    lags = stage1_params['lags']
+                    selected_states = stage1_params['selected_states']
+
+                    # Build training features up to last training date
+                    if lags is None:
+                        X_train, y_train, _ = create_enhanced_features(
+                            self.data, location, selected_states,
+                            end_date=train_end_date, horizon=horizon
+                        )
+                    else:
+                        X_train, y_train, _ = create_features(
+                            self.data, location, selected_states, lags,
+                            end_date=train_end_date, horizon=horizon
+                        )
+                    if len(X_train) < 50:
+                        continue
+                    # Log transform if enabled
+                    use_log = use_log_transform.get(location, False)
+                    if use_log:
+                        X_train_transformed = np.log1p(np.maximum(X_train, 0))
+                        y_train_transformed = np.log1p(np.maximum(y_train, 0))
+                    else:
+                        X_train_transformed = X_train
+                        y_train_transformed = y_train
+                    # Train Stage 1
+                    dtrain1 = lgb.Dataset(X_train_transformed, label=y_train_transformed, params={'verbose': -1})
+                    p1 = stage1_params['best_params'].copy(); p1['verbose'] = -1; p1['verbosity'] = -1
+                    stage1_model = lgb.train(p1, dtrain1, num_boost_round=stage1_params['num_boost_round'], callbacks=[])
+                    # Train Stage 2 with frozen mu
+                    mu_predictions = stage1_model.predict(X_train_transformed)
+                    init_score = np.column_stack([mu_predictions, np.zeros_like(mu_predictions)]).ravel(order='F')
+                    dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score, params={'verbose': -1})
+                    stage2_model = LightGBMLSS(GaussianFrozenLoc())
+                    p2 = stage2_params['best_params'].copy(); p2['verbose'] = -1; p2['verbosity'] = -1
+                    stage2_model.train(p2, dtrain2, num_boost_round=stage2_params['num_boost_round'])
+                    # Store
+                    stage1_models[location] = stage1_model
+                    stage2_models[location] = stage2_model
+                except Exception as e:
+                    print(f"  Warning: Training failed for {location}: {e}")
         
         # Generate model forecasts
         model_forecasts = self.generate_model_forecasts(
@@ -580,21 +631,38 @@ class BatchRetrospectiveForecastGenerator:
         
         print(f"\nSaving forecasts to {output_dir}/")
         
-        # Format and save model forecasts
+        # Format and save model forecasts (if any)
         model_df = self.format_cdc_flusight(model_forecasts, "TwoStage-FrozenMu", horizon)
-        cdc_column_order = ['reference_date', 'horizon', 'target', 'target_end_date', 
-                           'location', 'output_type', 'output_type_id', 'value']
-        model_df = model_df[cdc_column_order]
-        model_file = os.path.join(output_dir, f"TwoStage-FrozenMu_h{horizon}_forecasts.csv")
-        model_df.to_csv(model_file, index=False)
-        print(f"  Model forecasts saved: {model_file}")
+        if len(model_df) > 0:
+            cdc_column_order = ['reference_date', 'horizon', 'target', 'target_end_date', 
+                               'location', 'output_type', 'output_type_id', 'value']
+            # Ensure absent columns exist
+            for col in cdc_column_order:
+                if col not in model_df.columns:
+                    model_df[col] = []
+            model_df = model_df[cdc_column_order]
+            model_file = os.path.join(output_dir, f"TwoStage-FrozenMu_h{horizon}_forecasts.csv")
+            model_df.to_csv(model_file, index=False)
+            print(f"  Model forecasts saved: {model_file}")
+        else:
+            print("  No model forecasts generated; skipping model file.")
         
         # Format and save persistence forecasts
         persistence_df = self.format_cdc_flusight(persistence_forecasts, "Flusight-baseline", horizon)
-        persistence_df = persistence_df[cdc_column_order]
-        persistence_file = os.path.join(output_dir, f"Flusight-baseline_h{horizon}_forecasts.csv")
-        persistence_df.to_csv(persistence_file, index=False)
-        print(f"  Baseline forecasts saved: {persistence_file}")
+        if len(persistence_df) > 0:
+            cdc_column_order = ['reference_date', 'horizon', 'target', 'target_end_date', 
+                               'location', 'output_type', 'output_type_id', 'value']
+            for col in cdc_column_order:
+                if col not in persistence_df.columns:
+                    persistence_df[col] = []
+            persistence_df = persistence_df[cdc_column_order]
+            # Save a single baseline file per horizon at the retrospective root
+            retrospective_root = os.path.dirname(output_dir)
+            persistence_file = os.path.join(retrospective_root, f"Flusight-baseline_h{horizon}_forecasts.csv")
+            persistence_df.to_csv(persistence_file, index=False)
+            print(f"  Baseline forecasts saved: {persistence_file}")
+        else:
+            print("  No baseline forecasts generated; skipping baseline file.")
 
 
 def main():
@@ -609,12 +677,14 @@ def main():
                        help='Cut-off date for train/validation split (YYYY-MM-DD)')
     
     # Optional arguments
-    parser.add_argument('--models-dir', type=str, default='models/saved',
-                       help='Directory containing saved models (default: models/saved)')
-    parser.add_argument('--output-base', type=str, default='forecasts/retrospective/saved_models',
-                       help='Base output directory for forecasts (default: forecasts/retrospective/saved_models)')
+    parser.add_argument('--models-dir', type=str, default='models',
+                       help='Directory containing model hyperparameters (default: models)')
+    parser.add_argument('--output-base', type=str, default='forecasts/retrospective',
+                       help='Base output directory for forecasts (default: forecasts/retrospective)')
     parser.add_argument('--models-base-dir', type=str, default='models',
                        help='Base directory for saved models (default: models)')
+    parser.add_argument('--horizons', type=str, default=None,
+                       help='Optional comma-separated list of horizons to process (e.g., "1,2")')
     
     args = parser.parse_args()
     
@@ -646,6 +716,11 @@ def main():
         print("\nNo model configurations found!")
         return
     
+    # Optionally filter configurations by user-requested horizons
+    if args.horizons:
+        wanted = set(int(h.strip()) for h in args.horizons.split(',') if h.strip())
+        configurations = [c for c in configurations if c['horizon'] in wanted]
+
     # Process each configuration
     for i, config in enumerate(configurations, 1):
         print(f"\n[{i}/{len(configurations)}] ", end="")

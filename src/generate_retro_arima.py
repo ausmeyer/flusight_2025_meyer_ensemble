@@ -10,10 +10,10 @@ This script:
 5. Outputs forecasts in CDC FluSight format
 
 Usage:
-    python src/generate_arima_retrospective_forecasts.py \
+    python src/generate_retro_arima.py \
         --data-file data/imputed_and_stitched_hosp_2025-05-24.csv \
         --cut-off 2024-10-01 \
-        --output forecasts/retrospective/saved_models/arima
+        --output forecasts/retrospective/arima
 """
 
 import os
@@ -419,7 +419,7 @@ def main():
                        help='Cut-off date for train/test split (YYYY-MM-DD)')
     
     # Optional arguments
-    parser.add_argument('--output', type=str, default='forecasts/retrospective/saved_models/arima',
+    parser.add_argument('--output', type=str, default='forecasts/retrospective/arima',
                        help='Output directory for forecasts')
     parser.add_argument('--max-horizon', type=int, default=4,
                        help='Maximum forecast horizon (default: 4)')

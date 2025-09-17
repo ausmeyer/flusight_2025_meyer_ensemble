@@ -42,7 +42,8 @@ download_ilinet_data <- function(years = NULL) {
 
 # Define all input and output file names
 # Automatically set the "as-of" date to the most recent Saturday prior to run time
-as_of_date <- lubridate::floor_date(Sys.Date(), unit = "week", week_start = 7)
+# wday(): Sunday=1, Monday=2, ..., Saturday=7 by default. Subtract the offset to last Saturday.
+as_of_date <- Sys.Date() - ((lubridate::wday(Sys.Date()) - 7) %% 7)
 as_of_str  <- format(as_of_date, "%Y-%m-%d")
 
 file_names <- list(

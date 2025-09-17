@@ -58,7 +58,7 @@ if (!require(scoringutils, quietly = TRUE)) {
 
 This comprehensive analysis compares retrospective out-of-sample forecasts from:
 
-- **TwoStage-Ensemble**: Averaged ensemble of all two-stage models in saved_models directory
+- **TwoStage-Ensemble**: Averaged ensemble of all two-stage model folders
 - **FluSight-baseline**: CDC standard persistence baseline model
 
 The ensemble averages quantile forecasts across all available models for each horizon, creating a robust combined forecast.
@@ -96,15 +96,15 @@ for (horizon in available_horizons_baseline) {
 }
 
 # Now load and ensemble the saved models
-saved_models_dir <- "retrospective/saved_models"
-model_folders <- list.dirs(saved_models_dir, full.names = TRUE, recursive = FALSE)
+model_base_dir <- "retrospective"
+model_folders <- list.dirs(model_base_dir, full.names = TRUE, recursive = FALSE)
 
 # Conditionally include ARIMA based on configuration
 if (!INCLUDE_ARIMA) {
   model_folders <- model_folders[!grepl("arima", basename(model_folders), ignore.case = TRUE)]
-  cat(sprintf("\nFound %d model folders in saved_models directory (ARIMA excluded)\n", length(model_folders)))
+  cat(sprintf("\nFound %d model folders in retrospective directory (ARIMA excluded)\n", length(model_folders)))
 } else {
-  cat(sprintf("\nFound %d model folders in saved_models directory (ARIMA included)\n", length(model_folders)))
+  cat(sprintf("\nFound %d model folders in retrospective directory (ARIMA included)\n", length(model_folders)))
 }
 
 # Track which models are included by horizon and overall
@@ -298,7 +298,7 @@ location_mapping <- c(
 
 # Report ensemble composition
 cat("\n=== ENSEMBLE COMPOSITION ===\n")
-cat(sprintf("Number of model folders processed (saved_models): %d\n", length(model_folders)))
+cat(sprintf("Number of model folders processed (retrospective): %d\n", length(model_folders)))
 if (length(model_folders) > 0) {
   cat("Saved model folders included:\n")
   for (folder in model_folders) {
@@ -1167,7 +1167,7 @@ if (exists("relative_wis_total")) {
 
 ## Ensemble Methodology
 The ensemble forecast is created by:
-1. Loading all model forecasts from the saved_models directory
+1. Loading all model forecasts from the retrospective directory
 2. For each quantile level (0.01, 0.025, ..., 0.99), averaging the forecasted values across all models
 3. This creates a combined probabilistic forecast that typically has better calibration than individual models
 

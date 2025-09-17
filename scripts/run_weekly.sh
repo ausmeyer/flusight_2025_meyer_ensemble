@@ -56,10 +56,14 @@ ASTS=$(echo "$ASOF" | tr -d -)
 echo "AS OF: $ASOF ($ASTS)"
 
 echo "==> Render stitch.Rmd"
-Rscript -e "rmarkdown::render('src/stitch.Rmd', output_file='src/stitch.html')"
+Rscript -e "rmarkdown::render('src/stitch.Rmd', output_dir='src', output_file='stitch.html')"
 
-echo "==> Locate latest stitched file"
-STITCHED=$(ls -1 data/imputed_sets/imputed_and_stitched_hosp_*.csv | sort | tail -n 1)
+echo "==> Locate stitched file for ASOF"
+STITCHED="data/imputed_sets/imputed_and_stitched_hosp_${ASOF}.csv"
+if [[ ! -f "$STITCHED" ]]; then
+  echo "Expected stitched file not found for ASOF ($ASOF). Falling back to latest."
+  STITCHED=$(ls -1 data/imputed_sets/imputed_and_stitched_hosp_*.csv | sort | tail -n 1)
+fi
 echo "Stitched: $STITCHED"
 
 echo "==> Compute cutoff (last_date - 8 weeks)"
@@ -73,18 +77,18 @@ PY
 )
 echo "Cutoff: $CUTOFF"
 
-mkdir -p forecasts/retrospective/saved_models/arima
-mkdir -p forecasts/retrospective/saved_models/lgbm_enhanced_t10
+mkdir -p forecasts/retrospective/arima
+mkdir -p forecasts/retrospective/lgbm_enhanced_t10
 mkdir -p forecasts/prospective
 
 echo "==> Retrospective ARIMA"
 python src/generate_retro_arima.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
-  --output forecasts/retrospective/saved_models/arima --max-horizon 4
+  --output forecasts/retrospective/arima --max-horizon 4
 
 echo "==> Retrospective LGBM (using hyperparams in models/lgbm_enhanced_t10)"
 python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
   --models-dir models/lgbm_enhanced_t10 --models-base-dir models/lgbm_enhanced_t10 \
-  --output-base forecasts/retrospective/saved_models
+  --output-base forecasts/retrospective
 
 echo "==> Retrospective SVM (h=1..4)"
 for H in 1 2 3 4; do
@@ -92,7 +96,7 @@ for H in 1 2 3 4; do
     --hyperparams models/svm_t100/svm_hyperparameters_h${H}_t100.pkl \
     --data-file "$STITCHED" \
     --cut-off "$CUTOFF" \
-    --output forecasts/retrospective \
+    --output forecasts/retrospective/svm_t100 \
     --max-weeks 0 || true
 done
 

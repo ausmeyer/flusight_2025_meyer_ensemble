@@ -135,9 +135,9 @@ compute_weights <- function(model_dfs, horizon, as_of_date, lookback_weeks = 4, 
 # Load retrospective model files (last 8 weeks window) for weighting
 load_retro_for_h <- function(h) {
   lst <- list()
-  arima_path <- file.path('forecasts/retrospective/saved_models/arima', sprintf('ARIMA_h%d_forecasts.csv', h))
-  lgbm_path  <- file.path('forecasts/retrospective/saved_models/lgbm_enhanced_t10', sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
-  svm_glob   <- list.files('forecasts/retrospective', pattern = sprintf('^svm.*_h%d.*\\.csv$', h), full.names = TRUE, ignore.case = TRUE)
+  arima_path <- file.path('forecasts/retrospective/arima', sprintf('ARIMA_h%d_forecasts.csv', h))
+  lgbm_path  <- file.path('forecasts/retrospective/lgbm_enhanced_t10', sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
+  svm_glob   <- list.files('forecasts/retrospective/svm_t100', pattern = sprintf('^svm.*_h%d.*\\.csv$', h), full.names = TRUE, ignore.case = TRUE)
 
   if (INCLUDE_ARIMA && file.exists(arima_path)) {
     lst$ARIMA <- read_csv(arima_path, show_col_types = FALSE)
@@ -178,7 +178,6 @@ dir.create('forecasts/prospective', showWarnings = FALSE, recursive = TRUE)
 
 for (h in 1:4) {
   retro_models <- load_retro_for_h(h)
-  if (length(retro_models) == 0) next
   # Standardize minimal columns and ensure types
   retro_models <- lapply(retro_models, function(df) {
     if (!('output_type' %in% names(df))) df$output_type <- 'quantile'
@@ -186,11 +185,17 @@ for (h in 1:4) {
     df
   })
 
-  weights <- compute_weights(retro_models, h, as_of_date, lookback_weeks = LOOKBACK_WEEKS, history_weeks = HISTORY_WEEKS)
-  message(sprintf("H%d weights: %s", h, paste(sprintf('%s=%.3f', names(weights), weights), collapse=', ')))
+  # We will compute weights if retrospective data exists; otherwise fall back to equal weights over prospective models
+  weights <- NULL
+  if (length(retro_models) > 0) {
+    weights <- compute_weights(retro_models, h, as_of_date, lookback_weeks = LOOKBACK_WEEKS, history_weeks = HISTORY_WEEKS)
+    message(sprintf("H%d weights: %s", h, paste(sprintf('%s=%.3f', names(weights), weights), collapse=', ')))
+  } else {
+    message(sprintf("H%d: No retrospective files found; will fall back to equal weights across available prospective models.", h))
+  }
 
   prosp_models <- load_prosp_for_h(h, as_of_ts)
-  if (length(prosp_models) == 0) next
+  if (length(prosp_models) == 0) { message(sprintf("H%d: No prospective model files found; skipping.", h)); next }
   prosp_models <- lapply(prosp_models, function(df) {
     if (!('output_type' %in% names(df))) df$output_type <- 'quantile'
     if ('output_type_id' %in% names(df)) df$output_type_id <- as.numeric(df$output_type_id)
@@ -201,6 +206,12 @@ for (h in 1:4) {
   combined <- bind_rows(
     lapply(names(prosp_models), function(mn) mutate(prosp_models[[mn]], source_model = mn))
   ) %>% filter(output_type == 'quantile')
+
+  # If weights are NULL (no retros), use equal weights across prospective models
+  if (is.null(weights) || length(weights) == 0) {
+    unique_models <- unique(combined$source_model)
+    weights <- setNames(rep(1/length(unique_models), length(unique_models)), unique_models)
+  }
 
   ensemble <- combined %>%
     group_by(reference_date, target_end_date, location, output_type, output_type_id) %>%
