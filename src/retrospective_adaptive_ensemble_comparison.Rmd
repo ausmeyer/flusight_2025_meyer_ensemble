@@ -1,13 +1,12 @@
 ---
-title: "TwoStage Adaptive Weighted Ensemble Retrospective Analysis"
-subtitle: "Adaptive Ensemble of Saved Models vs FluSight-baseline - All Locations"
-author: "Two-Stage Model Adaptive Ensemble Retrospective Analysis"
+title: "Retrospective WIS Evaluation (Pipeline Outputs)"
+subtitle: "Per-horizon and combined WIS and relative WIS since 2025-07-01"
+author: "Pipeline Evaluation"
 date: "`r Sys.Date()`"
-output: 
+output:
   html_document:
     theme: flatly
-    toc: true
-    toc_float: true
+    toc: false
     code_folding: hide
     fig_width: 14
     fig_height: 8
@@ -15,1395 +14,38 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-  echo = TRUE, 
-  warning = FALSE, 
+  echo = TRUE,
+  warning = FALSE,
   message = FALSE,
   fig.width = 14,
-  fig.height = 8,
-  eval = FALSE   # disable old chunks; new evaluation chunk added below
+  fig.height = 8
 )
 
-# CONFIGURATION
-# - Set to TRUE to include ARIMA in ensemble, FALSE to exclude
-INCLUDE_ARIMA <- TRUE
-# - Directories to scan for additional external model CSVs (e.g., SVM)
-#   These paths are relative to this Rmd's working directory
-EXTERNAL_MODEL_DIRS <- c(
-  "retrospective",                                  # local drop-in
-  "../../../flusight_2025_svm/forecasts/retrospective" # SVM project (if present)
-)
-
-# Load required libraries
 library(dplyr)
-library(ggplot2)
-library(plotly)
-library(DT)
 library(readr)
 library(lubridate)
-library(scales)
-library(htmlwidgets)
-library(crosstalk)
-library(purrr)
 library(tidyr)
+library(ggplot2)
 library(knitr)
-library(gridExtra)
-
-# Install and load scoringutils if not available
-if (!require(scoringutils, quietly = TRUE)) {
-  install.packages("scoringutils")
-  library(scoringutils)
-}
 ```
-
-# Executive Summary
-
-This comprehensive analysis compares retrospective out-of-sample forecasts from:
-
-- **TwoStage-AdaptiveEnsemble**: Adaptively weighted ensemble of all two-stage models
-- **FluSight-baseline**: CDC standard persistence baseline model
-
-The adaptive ensemble weights each model based on its performance (WIS) over the preceding 4 weeks, calculated separately for each horizon. This creates a dynamic weighting scheme that adapts to recent model performance while maintaining prospective validity (no future information leakage).
-
-Key metrics include point forecast accuracy (MAE, RMSE), probabilistic forecast quality (WIS), and coverage analysis across available horizons.
-
-```{r load-data}
-# Load forecast data for both models
-cat("Loading retrospective forecast data...\n")
-
-# First, load baseline data (same as original)
-baseline_files <- list.files("retrospective", pattern = "Flusight-baseline_h[1-4]_forecasts.csv", full.names = TRUE)
-available_horizons_baseline <- unique(as.numeric(gsub(".*_h([1-4])_.*", "\\1", baseline_files)))
-
-# Load baseline data
-models_data <- list()
-
-for (horizon in available_horizons_baseline) {
-  # FluSight-baseline
-  baseline_file <- sprintf("retrospective/Flusight-baseline_h%d_forecasts.csv", horizon)
-  if (file.exists(baseline_file)) {
-    baseline_data <- read_csv(baseline_file, show_col_types = FALSE)
-    # Adjust horizon numbering if needed
-    if (all(baseline_data$horizon == (horizon - 1))) {
-      baseline_data$horizon <- horizon
-    }
-    baseline_data$model <- "FluSight-baseline"
-    # Filter to only include forecasts with target dates on or after 11/23/2024
-    baseline_data <- baseline_data %>%
-      mutate(target_end_date = as.Date(target_end_date)) %>%
-      filter(target_end_date >= as.Date("2024-11-23"))
-    models_data[[paste0("baseline_h", horizon)]] <- baseline_data
-    cat(sprintf("Loaded FluSight-baseline horizon %d: %d rows (after filtering for dates >= 2024-11-23)\n", horizon, nrow(baseline_data)))
-  }
-}
-
-# Load actual hospitalization data first (needed for weight calculation)
-actual_data_file <- "../data/imputed_and_stitched_hosp_2025-05-24.csv"
-if (file.exists(actual_data_file)) {
-  actual_raw <- read_csv(actual_data_file, show_col_types = FALSE)
-  actual_data <- actual_raw %>%
-    select(location_name, date, total_hosp) %>%
-    rename(state_name = location_name, actual_value = total_hosp) %>%
-    mutate(date = as.Date(date)) %>%
-    filter(!is.na(actual_value))
-  
-  # Create location mapping from state names to FIPS codes
-  location_to_fips <- c(
-    'Alabama' = '01', 'Alaska' = '02', 'Arizona' = '04', 'Arkansas' = '05',
-    'California' = '06', 'Colorado' = '08', 'Connecticut' = '09', 'Delaware' = '10',
-    'District of Columbia' = '11', 'Florida' = '12', 'Georgia' = '13', 'Hawaii' = '15',
-    'Idaho' = '16', 'Illinois' = '17', 'Indiana' = '18', 'Iowa' = '19',
-    'Kansas' = '20', 'Kentucky' = '21', 'Louisiana' = '22', 'Maine' = '23',
-    'Maryland' = '24', 'Massachusetts' = '25', 'Michigan' = '26', 'Minnesota' = '27',
-    'Mississippi' = '28', 'Missouri' = '29', 'Montana' = '30', 'Nebraska' = '31',
-    'Nevada' = '32', 'New Hampshire' = '33', 'New Jersey' = '34', 'New Mexico' = '35',
-    'New York' = '36', 'North Carolina' = '37', 'North Dakota' = '38', 'Ohio' = '39',
-    'Oklahoma' = '40', 'Oregon' = '41', 'Pennsylvania' = '42', 'Puerto Rico' = '72',
-    'Rhode Island' = '44', 'South Carolina' = '45', 'South Dakota' = '46', 'Tennessee' = '47',
-    'Texas' = '48', 'Utah' = '49', 'Vermont' = '50', 'Virginia' = '51',
-    'Virgin Islands' = '78', 'Guam' = '66',
-    'Washington' = '53', 'West Virginia' = '54', 'Wisconsin' = '55', 'Wyoming' = '56',
-    'United States' = 'US'
-  )
-  
-  # Add FIPS codes to actual data
-  actual_data$location <- location_to_fips[actual_data$state_name]
-  
-  # Keep both filtered and unfiltered for different uses
-  actual_data_display <- actual_data %>% filter(date >= as.Date("2024-11-23"))
-  
-  cat(sprintf("\nLoaded actual hospitalization data: %d total rows\n", nrow(actual_data)))
-  cat(sprintf("Date range: %s to %s\n", min(actual_data$date), max(actual_data$date)))
-  cat(sprintf("Number of locations: %d\n", n_distinct(actual_data$location)))
-} else {
-  stop("Actual data file not found!")
-}
-
-# FIPS to state name mapping
-location_mapping <- c(
-  '01' = 'Alabama', '02' = 'Alaska', '04' = 'Arizona', '05' = 'Arkansas',
-  '06' = 'California', '08' = 'Colorado', '09' = 'Connecticut', '10' = 'Delaware',
-  '11' = 'District of Columbia', '12' = 'Florida', '13' = 'Georgia', '15' = 'Hawaii',
-  '16' = 'Idaho', '17' = 'Illinois', '18' = 'Indiana', '19' = 'Iowa',
-  '20' = 'Kansas', '21' = 'Kentucky', '22' = 'Louisiana', '23' = 'Maine',
-  '24' = 'Maryland', '25' = 'Massachusetts', '26' = 'Michigan', '27' = 'Minnesota',
-  '28' = 'Mississippi', '29' = 'Missouri', '30' = 'Montana', '31' = 'Nebraska',
-  '32' = 'Nevada', '33' = 'New Hampshire', '34' = 'New Jersey', '35' = 'New Mexico',
-  '36' = 'New York', '37' = 'North Carolina', '38' = 'North Dakota', '39' = 'Ohio',
-  '40' = 'Oklahoma', '41' = 'Oregon', '42' = 'Pennsylvania', '72' = 'Puerto Rico',
-  '44' = 'Rhode Island', '45' = 'South Carolina', '46' = 'South Dakota', '47' = 'Tennessee',
-  '48' = 'Texas', '49' = 'Utah', '50' = 'Vermont', '51' = 'Virginia',
-  '78' = 'Virgin Islands', '66' = 'Guam',
-  '53' = 'Washington', '54' = 'West Virginia', '55' = 'Wisconsin', '56' = 'Wyoming',
-  'US' = 'United States'
-)
-```
-
-```{r adaptive-ensemble-functions}
-# Function to calculate WIS for a single forecast
-calculate_wis_single <- function(quantile_values, quantile_levels, actual_value) {
-  # Convert to log scale for CDC methodology
-  quantile_values_log <- log(quantile_values + 1)
-  actual_value_log <- log(actual_value + 1)
-  
-  # Calculate interval scores for each symmetric interval
-  interval_scores <- c()
-  alphas <- c()
-  
-  # Process symmetric quantile pairs
-  unique_alphas <- unique(c(quantile_levels[quantile_levels <= 0.5], 
-                           1 - quantile_levels[quantile_levels > 0.5]))
-  
-  for (alpha in unique_alphas[unique_alphas > 0]) {
-    # Find lower and upper quantiles
-    lower_idx <- which.min(abs(quantile_levels - alpha))
-    upper_idx <- which.min(abs(quantile_levels - (1 - alpha)))
-    
-    lower_val <- quantile_values_log[lower_idx]
-    upper_val <- quantile_values_log[upper_idx]
-    
-    # Calculate interval score
-    width <- upper_val - lower_val
-    if (actual_value_log < lower_val) {
-      penalty <- (2/alpha) * (lower_val - actual_value_log)
-    } else if (actual_value_log > upper_val) {
-      penalty <- (2/alpha) * (actual_value_log - upper_val)
-    } else {
-      penalty <- 0
-    }
-    
-    interval_scores <- c(interval_scores, width + penalty)
-    alphas <- c(alphas, alpha)
-  }
-  
-  # Return weighted average (equal weights for simplicity)
-  return(mean(interval_scores))
-}
-
-# Function to calculate model weights based on past 4 weeks performance
-calculate_adaptive_weights <- function(model_forecasts_list, actual_data, 
-                                      reference_date, horizon, lookback_weeks = 4) {
-  
-  # Calculate the evaluation period (4 weeks before reference_date)
-  eval_end_date <- reference_date - days(7)  # Don't include current week
-  eval_start_date <- eval_end_date - weeks(lookback_weeks)
-  
-  # Initialize model scores
-  model_scores <- list()
-  
-  for (model_name in names(model_forecasts_list)) {
-    model_data <- model_forecasts_list[[model_name]]
-    
-    # Filter to evaluation period
-    eval_forecasts <- model_data %>%
-      filter(reference_date >= eval_start_date & reference_date <= eval_end_date,
-             output_type == "quantile") %>%
-      mutate(output_type_id = as.numeric(output_type_id))
-    
-    if (nrow(eval_forecasts) == 0) {
-      model_scores[[model_name]] <- NA
-      next
-    }
-    
-    # Calculate WIS for each forecast
-    wis_scores <- eval_forecasts %>%
-      group_by(reference_date, location, target_end_date) %>%
-      summarise(
-        quantile_values = list(value),
-        quantile_levels = list(output_type_id),
-        .groups = "drop"
-      ) %>%
-      left_join(actual_data %>% select(date, location, actual_value),
-                by = c("target_end_date" = "date", "location")) %>%
-      filter(!is.na(actual_value)) %>%
-      rowwise() %>%
-      mutate(
-        wis = calculate_wis_single(unlist(quantile_values), 
-                                  unlist(quantile_levels), 
-                                  actual_value)
-      ) %>%
-      ungroup()
-    
-    # Average WIS across all forecasts in evaluation period
-    if (nrow(wis_scores) > 0) {
-      model_scores[[model_name]] <- mean(wis_scores$wis, na.rm = TRUE)
-    } else {
-      model_scores[[model_name]] <- NA
-    }
-  }
-  
-  # Convert scores to weights (inverse of WIS, normalized)
-  valid_scores <- model_scores[!is.na(model_scores)]
-  
-  if (length(valid_scores) == 0) {
-    # If no valid scores, use equal weights
-    weights <- rep(1/length(model_forecasts_list), length(model_forecasts_list))
-    names(weights) <- names(model_forecasts_list)
-  } else {
-    # Use inverse WIS as weights
-    inverse_scores <- 1 / unlist(valid_scores)
-    weights <- inverse_scores / sum(inverse_scores)
-    
-    # Add zero weights for models with NA scores
-    for (model_name in names(model_scores)) {
-      if (is.na(model_scores[[model_name]])) {
-        weights[model_name] <- 0
-      }
-    }
-  }
-  
-  return(weights)
-}
-```
-
-```{r create-adaptive-ensemble}
-# Now load and create adaptive ensemble for saved models
-model_base_dir <- "retrospective"
-model_folders <- list.dirs(model_base_dir, full.names = TRUE, recursive = FALSE)
-
-# Conditionally include ARIMA based on configuration
-if (!INCLUDE_ARIMA) {
-  model_folders <- model_folders[!grepl("arima", basename(model_folders), ignore.case = TRUE)]
-  cat(sprintf("\nFound %d model folders in retrospective directory (ARIMA excluded)\n", length(model_folders)))
-} else {
-  cat(sprintf("\nFound %d model folders in retrospective directory (ARIMA included)\n", length(model_folders)))
-}
-
-# Store weight history for reporting
-weight_history <- list()
-included_models_by_horizon <- list()
-
-# Process each horizon
-for (horizon in 1:4) {
-  cat(sprintf("\n=== Processing Horizon %d ===\n", horizon))
-  
-  # First, load all model data for this horizon
-  all_model_data <- list()
-  model_count <- 0
-  included_models_current <- c()
-  
-  for (folder in model_folders) {
-    model_name <- basename(folder)
-    
-    # Check for different file naming patterns
-    if (model_name == "arima") {
-      # ARIMA uses different naming convention
-      model_file <- file.path(folder, sprintf("ARIMA_h%d_forecasts.csv", horizon))
-    } else {
-      # Two-stage models use this naming
-      model_file <- file.path(folder, sprintf("TwoStage-FrozenMu_h%d_forecasts.csv", horizon))
-    }
-    
-    if (file.exists(model_file)) {
-      model_data <- read_csv(model_file, show_col_types = FALSE)
-      # Adjust horizon numbering if needed
-      if (all(model_data$horizon == (horizon - 1))) {
-        model_data$horizon <- horizon
-      }
-      model_data$source_model <- model_name
-      model_data$reference_date <- as.Date(model_data$reference_date)
-      model_data$target_end_date <- as.Date(model_data$target_end_date)
-      
-      all_model_data[[model_name]] <- model_data
-      model_count <- model_count + 1
-      included_models_current <- c(included_models_current, model_name)
-    }
-  }
-
-  # Also look for external SVM CSVs for this horizon in configured directories
-  svm_files <- unique(unlist(lapply(EXTERNAL_MODEL_DIRS, function(d) {
-    if (!dir.exists(d)) return(character(0))
-    list.files(
-      d,
-      pattern = paste0("^svm.*_h", horizon, ".*\\.csv$"),
-      full.names = TRUE,
-      ignore.case = TRUE
-    )
-  })))
-
-  if (length(svm_files) > 0) {
-    for (svm_file in svm_files) {
-      # Derive model name from file (e.g., svm_t25_h1.csv -> svm_t25)
-      svm_base <- basename(svm_file)
-      svm_name <- sub("_h[0-9].*$", "", svm_base)
-      
-      svm_data <- read_csv(svm_file, show_col_types = FALSE)
-      # Normalize column names to match expected schema
-      if ("type" %in% names(svm_data)) {
-        svm_data <- svm_data %>% rename(output_type = type)
-      }
-      if ("quantile" %in% names(svm_data)) {
-        svm_data <- svm_data %>% rename(output_type_id = quantile)
-      }
-      if ("output_type_id" %in% names(svm_data)) {
-        svm_data$output_type_id <- as.numeric(svm_data$output_type_id)
-      }
-      if ("horizon" %in% names(svm_data) && all(svm_data$horizon == (horizon - 1))) {
-        svm_data$horizon <- horizon
-      }
-      svm_data$source_model <- svm_name
-      svm_data$reference_date <- as.Date(svm_data$reference_date)
-      svm_data$target_end_date <- as.Date(svm_data$target_end_date)
-      
-      all_model_data[[svm_name]] <- svm_data
-      model_count <- model_count + 1
-      included_models_current <- c(included_models_current, svm_name)
-    }
-  }
-  
-  if (length(included_models_current) > 0) {
-    included_models_by_horizon[[paste0("h", horizon)]] <- sort(unique(included_models_current))
-  }
-  
-  if (model_count == 0) {
-    cat(sprintf("No models found for horizon %d\n", horizon))
-    next
-  }
-  
-  cat(sprintf("Loaded %d models for horizon %d\n", model_count, horizon))
-  
-  # Get unique reference dates
-  all_ref_dates <- unique(do.call(c, lapply(all_model_data, function(x) unique(x$reference_date))))
-  all_ref_dates <- sort(all_ref_dates)
-  
-  # Filter to dates >= 2024-11-23
-  all_ref_dates <- all_ref_dates[all_ref_dates >= as.Date("2024-11-23")]
-  
-  # Create adaptive ensemble for each reference date
-  ensemble_forecasts <- list()
-  
-  for (ref_date in all_ref_dates) {
-    # Calculate weights based on past 4 weeks performance
-    weights <- calculate_adaptive_weights(all_model_data, actual_data, 
-                                         ref_date, horizon, lookback_weeks = 4)
-    
-    # Store weights for this date
-    weight_history[[paste0("h", horizon, "_", ref_date)]] <- list(
-      horizon = horizon,
-      reference_date = ref_date,
-      weights = weights
-    )
-    
-    # Get forecasts for this reference date from each model
-    ref_date_forecasts <- list()
-    for (model_name in names(all_model_data)) {
-      model_forecast <- all_model_data[[model_name]] %>%
-        filter(reference_date == ref_date)
-      if (nrow(model_forecast) > 0) {
-        ref_date_forecasts[[model_name]] <- model_forecast
-      }
-    }
-    
-    if (length(ref_date_forecasts) == 0) next
-    
-    # Combine forecasts with weights
-    combined_forecast <- bind_rows(ref_date_forecasts) %>%
-      # Note: 'target' strings may differ across models; exclude it from grouping
-      group_by(reference_date, horizon, target_end_date, location, 
-               output_type, output_type_id) %>%
-      summarise(
-        # Weighted average using model weights
-        value = {
-          model_values <- value
-          model_names <- source_model
-          weighted_sum <- 0
-          total_weight <- 0
-          for (i in 1:length(model_values)) {
-            model_weight <- weights[model_names[i]]
-            if (!is.na(model_weight) && model_weight > 0) {
-              weighted_sum <- weighted_sum + model_values[i] * model_weight
-              total_weight <- total_weight + model_weight
-            }
-          }
-          if (total_weight > 0) {
-            weighted_sum / total_weight
-          } else {
-            mean(model_values, na.rm = TRUE)  # Fallback to simple average
-          }
-        },
-        n_models = n_distinct(source_model),
-        .groups = "drop"
-      )
-    
-    ensemble_forecasts[[as.character(ref_date)]] <- combined_forecast
-  }
-  
-  # Combine all dates
-  if (length(ensemble_forecasts) > 0) {
-    ensemble_data <- bind_rows(ensemble_forecasts) %>%
-      select(-n_models) %>%
-      mutate(model = "TwoStage-AdaptiveEnsemble") %>%
-      filter(target_end_date >= as.Date("2024-11-23"))
-    
-    models_data[[paste0("twostage_h", horizon)]] <- ensemble_data
-    cat(sprintf("Created adaptive ensemble for horizon %d: %d rows\n", 
-                horizon, nrow(ensemble_data)))
-  }
-}
-
-# Determine available horizons (where we have both baseline and ensemble)
-available_horizons <- c()
-for (h in 1:4) {
-  if (!is.null(models_data[[paste0("baseline_h", h)]]) && 
-      !is.null(models_data[[paste0("twostage_h", h)]])) {
-    available_horizons <- c(available_horizons, h)
-  }
-}
-
-cat(sprintf("\nAvailable horizons for comparison: %s\n", paste(sort(available_horizons), collapse = ", ")))
-
-# Report ensemble composition and sample weights
-cat("\n=== ENSEMBLE COMPOSITION ===\n")
-cat(sprintf("Number of model folders processed: %d\n", length(model_folders)))
-if (length(model_folders) > 0) {
-  cat("Saved model folders included:\n")
-  for (folder in model_folders) {
-    cat(sprintf("  - %s\n", basename(folder)))
-  }
-}
-
-# Compute overall included models and external models
-included_models_all <- sort(unique(unlist(included_models_by_horizon)))
-external_models_included <- setdiff(included_models_all, basename(model_folders))
-if (length(external_models_included) > 0) {
-  cat("External models included (from EXTERNAL_MODEL_DIRS):\n")
-  for (mdl in external_models_included) {
-    cat(sprintf("  - %s\n", mdl))
-  }
-} else {
-  cat("External models included: none detected\n")
-}
-
-cat("Models used in ensemble by horizon:\n")
-for (h in names(included_models_by_horizon)) {
-  cat(sprintf("  %s: %s\n", h, paste(included_models_by_horizon[[h]], collapse=", ")))
-}
-
-# Show sample weight evolution
-if (length(weight_history) > 0 && length(available_horizons) > 0) {
-  cat("\n=== SAMPLE WEIGHT EVOLUTION ===\n")
-  
-  for (h in available_horizons[1]) {  # Show for first available horizon
-    h_weights <- weight_history[grep(paste0("^h", h, "_"), names(weight_history))]
-    if (length(h_weights) >= 3) {
-      cat(sprintf("\nHorizon %d - Weight evolution (first, middle, last dates):\n", h))
-      
-      dates_to_show <- c(1, length(h_weights) %/% 2, length(h_weights))
-      for (idx in dates_to_show) {
-        if (idx <= length(h_weights)) {
-          weight_info <- h_weights[[idx]]
-          cat(sprintf("\n  Date: %s\n", weight_info$reference_date))
-          for (model_name in names(weight_info$weights)) {
-            cat(sprintf("    %s: %.3f\n", model_name, weight_info$weights[model_name]))
-          }
-        }
-      }
-      break  # Only show for one horizon
-    }
-  }
-}
-```
-
-```{r prepare-functions}
-# Function to prepare quantile data for plotting
-prepare_quantile_data <- function(data) {
-  quantile_data <- data %>%
-    filter(output_type == 'quantile') %>%
-    mutate(
-      output_type_id = as.numeric(output_type_id),
-      value = as.numeric(value)
-    )
-  
-  quantile_summary <- quantile_data %>%
-    group_by(reference_date, target_end_date, location, model) %>%
-    summarise(
-      q01 = value[which.min(abs(output_type_id - 0.01))],
-      q05 = value[which.min(abs(output_type_id - 0.05))],
-      q25 = value[which.min(abs(output_type_id - 0.25))],
-      median = value[which.min(abs(output_type_id - 0.5))],
-      q75 = value[which.min(abs(output_type_id - 0.75))],
-      q95 = value[which.min(abs(output_type_id - 0.95))],
-      q99 = value[which.min(abs(output_type_id - 0.99))],
-      .groups = "drop"
-    ) %>%
-    mutate(
-      q01 = pmin(q01, q05, q25, median, na.rm = TRUE),
-      q05 = pmin(q05, q25, median, na.rm = TRUE),
-      q25 = pmin(q25, median, na.rm = TRUE),
-      q75 = pmax(q75, median, na.rm = TRUE),
-      q95 = pmax(q95, q75, median, na.rm = TRUE),
-      q99 = pmax(q99, q95, q75, median, na.rm = TRUE)
-    )
-  
-  return(quantile_summary)
-}
-
-# Function to create horizon facet plot for adaptive ensemble (includes baseline)
-create_horizon_facet_plot_adaptive <- function(horizon_data, truth_data, horizon, location_mapping) {
-  # Prepare data
-  plot_data <- prepare_quantile_data(horizon_data)
-  
-  # Remove any rows with NA or invalid locations
-  plot_data <- plot_data %>% 
-    filter(!is.na(location) & location != "" & location != "location")
-  
-  # Debug: Check for unexpected locations
-  unknown_locs <- unique(plot_data$location[!plot_data$location %in% names(location_mapping)])
-  if (length(unknown_locs) > 0) {
-    cat("Warning: Unknown locations found:", paste(unknown_locs, collapse=", "), "\n")
-  }
-  
-  # Add location names
-  plot_data$location_name <- sapply(plot_data$location, function(loc) {
-    if (loc %in% names(location_mapping)) {
-      location_mapping[loc]
-    } else {
-      # Don't create entries for NA or empty locations
-      if (is.na(loc) || loc == "") {
-        return(NA)
-      }
-      paste("Location", loc)
-    }
-  })
-  
-  # Remove any rows with NA location names
-  plot_data <- plot_data %>% filter(!is.na(location_name))
-  
-  # Prepare truth data
-  truth_plot <- truth_data %>%
-    filter(!is.na(location) & location != "" & location != "location") %>%
-    mutate(location_name = sapply(location, function(loc) {
-      if (loc %in% names(location_mapping)) {
-        location_mapping[loc]
-      } else {
-        paste("Location", loc)
-      }
-    }))
-  
-  # Create plot with both baseline and adaptive ensemble
-  p <- ggplot() +
-    # FluSight-baseline (Purple) - plot first
-    geom_ribbon(data = plot_data %>% filter(model == "FluSight-baseline"),
-                aes(x = target_end_date, ymin = q01, ymax = q99),
-                fill = "#d9a8d9", alpha = 0.3) +
-    geom_ribbon(data = plot_data %>% filter(model == "FluSight-baseline"),
-                aes(x = target_end_date, ymin = q05, ymax = q95),
-                fill = "#bf7abf", alpha = 0.4) +
-    geom_ribbon(data = plot_data %>% filter(model == "FluSight-baseline"),
-                aes(x = target_end_date, ymin = q25, ymax = q75),
-                fill = "#8e4a8e", alpha = 0.5) +
-    geom_line(data = plot_data %>% filter(model == "FluSight-baseline"),
-              aes(x = target_end_date, y = median),
-              color = "#5d1a5d", linewidth = 1.0, linetype = "dashed") +
-    
-    # TwoStage-AdaptiveEnsemble (Orange)
-    geom_ribbon(data = plot_data %>% filter(model == "TwoStage-AdaptiveEnsemble"),
-                aes(x = target_end_date, ymin = q01, ymax = q99),
-                fill = "#ffd9b3", alpha = 0.3) +
-    geom_ribbon(data = plot_data %>% filter(model == "TwoStage-AdaptiveEnsemble"),
-                aes(x = target_end_date, ymin = q05, ymax = q95),
-                fill = "#ffb366", alpha = 0.4) +
-    geom_ribbon(data = plot_data %>% filter(model == "TwoStage-AdaptiveEnsemble"),
-                aes(x = target_end_date, ymin = q25, ymax = q75),
-                fill = "#ff8c1a", alpha = 0.5) +
-    geom_line(data = plot_data %>% filter(model == "TwoStage-AdaptiveEnsemble"),
-              aes(x = target_end_date, y = median),
-              color = "#cc5200", linewidth = 1.0) +
-    
-    # Ground truth (black)
-    geom_line(data = truth_plot,
-              aes(x = date, y = actual_value),
-              color = "black", linewidth = 1.2) +
-    geom_point(data = truth_plot,
-               aes(x = date, y = actual_value),
-               color = "black", size = 1, alpha = 0.7) +
-    
-    # Facet by location
-    facet_wrap(~ location_name, scales = "free_y", ncol = 6) +
-    
-    # Styling
-    scale_x_date(labels = date_format("%m/%d"), breaks = pretty_breaks(n = 4)) +
-    scale_y_continuous(labels = comma_format(), breaks = pretty_breaks(n = 4)) +
-    labs(
-      title = paste("Horizon", horizon, "-", horizon, "Week(s) Ahead Forecasts"),
-      subtitle = "Purple: FluSight-baseline (dashed) | Orange: TwoStage-AdaptiveEnsemble (solid) | Black: Actual",
-      x = NULL,
-      y = "Hospitalizations"
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(size = 14, face = "bold"),
-      plot.subtitle = element_text(size = 11),
-      strip.text = element_text(size = 9, face = "bold"),
-      axis.text = element_text(size = 7),
-      axis.title = element_text(size = 9),
-      panel.grid.minor = element_blank(),
-      panel.spacing = unit(0.5, "lines")
-    )
-  
-  return(p)
-}
-
-# Function to create comparison plot
-create_comparison_plot <- function(loc, horizon_data, truth_data, horizon_label) {
-  
-  loc_data <- horizon_data %>% filter(location == loc)
-  loc_truth <- truth_data %>% filter(location == loc)
-  
-  if (nrow(loc_data) == 0) {
-    return(NULL)
-  }
-  
-  # Create plot
-  p <- ggplot()
-  
-  # FluSight-baseline (Purple)
-  baseline_data <- loc_data %>% filter(model == "FluSight-baseline")
-  if (nrow(baseline_data) > 0) {
-    p <- p +
-      geom_ribbon(data = baseline_data, aes(x = reference_date, ymin = q01, ymax = q99),
-                 fill = "#d9a8d9", alpha = 0.3) +
-      geom_ribbon(data = baseline_data, aes(x = reference_date, ymin = q05, ymax = q95),
-                 fill = "#bf7abf", alpha = 0.4) +
-      geom_ribbon(data = baseline_data, aes(x = reference_date, ymin = q25, ymax = q75),
-                 fill = "#8e4a8e", alpha = 0.5) +
-      geom_line(data = baseline_data, aes(x = reference_date, y = median),
-               color = "#5d1a5d", linewidth = 1.0, linetype = "dashed")
-  }
-  
-  # TwoStage-AdaptiveEnsemble (Orange for adaptive)
-  twostage_data <- loc_data %>% filter(model == "TwoStage-AdaptiveEnsemble")
-  if (nrow(twostage_data) > 0) {
-    p <- p +
-      geom_ribbon(data = twostage_data, aes(x = reference_date, ymin = q01, ymax = q99),
-                 fill = "#ffd9a8", alpha = 0.3) +
-      geom_ribbon(data = twostage_data, aes(x = reference_date, ymin = q05, ymax = q95),
-                 fill = "#ffb37a", alpha = 0.4) +
-      geom_ribbon(data = twostage_data, aes(x = reference_date, ymin = q25, ymax = q75),
-                 fill = "#ff8d4d", alpha = 0.5) +
-      geom_line(data = twostage_data, aes(x = reference_date, y = median),
-               color = "#cc5500", linewidth = 1.0)
-  }
-  
-  # Ground truth
-  if (nrow(loc_truth) > 0) {
-    p <- p +
-      geom_line(data = loc_truth, aes(x = target_end_date, y = actual_value),
-               color = "black", linewidth = 1.2) +
-      geom_point(data = loc_truth, aes(x = target_end_date, y = actual_value),
-                color = "black", size = 1.5, alpha = 0.7)
-  }
-  
-  # Styling
-  location_name <- ifelse(loc %in% names(location_mapping), 
-                         location_mapping[loc], 
-                         paste("Location", loc))
-  
-  p <- p +
-    scale_x_date(labels = date_format("%m/%d"), breaks = pretty_breaks(n = 5)) +
-    scale_y_continuous(labels = comma_format(), breaks = pretty_breaks(n = 5)) +
-    labs(
-      title = paste(location_name, "-", horizon_label),
-      x = NULL,
-      y = "Hospitalizations"
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(size = 10, face = "bold"),
-      axis.text = element_text(size = 8),
-      axis.title = element_text(size = 9),
-      panel.grid.minor = element_blank()
-    )
-  
-  return(p)
-}
-```
-
-# Relative WIS by Horizon
-
-```{r horizon-wis}
-# Calculate WIS for each horizon separately using CDC methodology
-cat("Calculating relative WIS by horizon using CDC methodology...\n")
-cat("(Log-transformed data, geometric mean across locations, excluding PR and US)\n\n")
-
-horizon_wis_results <- list()
-
-for (h in available_horizons) {
-  baseline_key <- paste0("baseline_h", h)
-  twostage_key <- paste0("twostage_h", h)
-  
-  if (!is.null(models_data[[baseline_key]]) && !is.null(models_data[[twostage_key]])) {
-    # Combine data for this horizon
-    h_data <- bind_rows(models_data[[baseline_key]], models_data[[twostage_key]])
-    
-    # Convert dates
-    h_data$reference_date <- as.Date(h_data$reference_date)
-    h_data$target_end_date <- as.Date(h_data$target_end_date)
-    
-    # Get actual values
-    h_truth <- h_data %>%
-      select(target_end_date, location) %>%
-      distinct() %>%
-      left_join(actual_data_display, by = c("target_end_date" = "date", "location" = "location"))
-    
-    # Prepare WIS data with log transformation per CDC methodology
-    wis_ready_h <- h_data %>%
-      filter(output_type == 'quantile') %>%
-      mutate(
-        output_type_id = as.numeric(output_type_id),
-        value = as.numeric(value)
-      ) %>%
-      left_join(h_truth %>% select(target_end_date, location, actual_value),
-                by = c("target_end_date", "location")) %>%
-      filter(!is.na(actual_value)) %>%
-      mutate(
-        # Apply log transformation (log(x + 1) to handle zeros)
-        value_log = log(value + 1),
-        actual_value_log = log(actual_value + 1)
-      ) %>%
-      select(model, location, reference_date, target_end_date, actual_value_log, 
-             output_type_id, value_log) %>%
-      rename(
-        prediction = value_log,
-        true_value = actual_value_log,
-        quantile = output_type_id
-      )
-    
-    if (nrow(wis_ready_h) > 0) {
-      # Calculate WIS scores
-      wis_scores_h <- wis_ready_h %>%
-        score()
-      
-      # Find locations that both models have, excluding PR and US
-      common_locations_h <- wis_scores_h %>%
-        group_by(location, model) %>%
-        summarise(n = n(), .groups = "drop") %>%
-        group_by(location) %>%
-        summarise(n_models = n_distinct(model), .groups = "drop") %>%
-        filter(n_models == 2) %>%
-        pull(location)
-      
-      common_locations_h <- common_locations_h[!common_locations_h %in% c("72", "US")]
-      
-      # Filter to only common locations
-      wis_scores_common_h <- wis_scores_h %>%
-        filter(location %in% common_locations_h)
-      
-      # Calculate geometric mean WIS by location first
-      wis_by_loc_h <- wis_scores_common_h %>%
-        group_by(model, location) %>%
-        summarise(
-          mean_wis_loc = mean(interval_score, na.rm = TRUE),
-          .groups = "drop"
-        )
-      
-      # Overall WIS using geometric mean across locations (CDC methodology)
-      overall_wis_h <- wis_by_loc_h %>%
-        group_by(model) %>%
-        summarise(
-          n_locations = n_distinct(location),
-          geometric_mean_wis = exp(mean(log(mean_wis_loc), na.rm = TRUE)),
-          .groups = "drop"
-        )
-      
-      # Calculate relative WIS
-      baseline_wis_h <- overall_wis_h$geometric_mean_wis[overall_wis_h$model == "FluSight-baseline"]
-      twostage_wis_h <- overall_wis_h$geometric_mean_wis[overall_wis_h$model == "TwoStage-AdaptiveEnsemble"]
-      
-      if (length(baseline_wis_h) > 0 && length(twostage_wis_h) > 0) {
-        relative_wis_h <- twostage_wis_h / baseline_wis_h
-        
-        horizon_wis_results[[h]] <- data.frame(
-          horizon = h,
-          n_locations = length(common_locations_h),
-          baseline_wis = baseline_wis_h,
-          twostage_wis = twostage_wis_h,
-          relative_wis = relative_wis_h,
-          improvement = (1 - relative_wis_h) * 100
-        )
-      }
-    }
-  }
-}
-
-# Display results
-if (length(horizon_wis_results) > 0) {
-  horizon_wis_df <- bind_rows(horizon_wis_results)
-  
-  cat("RELATIVE WIS BY HORIZON:\n")
-  cat("========================\n\n")
-  
-  for (i in 1:nrow(horizon_wis_df)) {
-    cat(sprintf("Horizon %d (%d week%s ahead):\n", 
-                horizon_wis_df$horizon[i], 
-                horizon_wis_df$horizon[i],
-                if(horizon_wis_df$horizon[i] > 1) "s" else ""))
-    cat(sprintf("  Locations compared: %d\n", horizon_wis_df$n_locations[i]))
-    cat(sprintf("  FluSight-baseline Geometric Mean WIS: %.3f\n", horizon_wis_df$baseline_wis[i]))
-    cat(sprintf("  TwoStage-AdaptiveEnsemble Geometric Mean WIS: %.3f\n", horizon_wis_df$twostage_wis[i]))
-    cat(sprintf("  Relative WIS: %.4f\n", horizon_wis_df$relative_wis[i]))
-    cat(sprintf("  Performance: %.1f%% %s than baseline\n\n", 
-                abs(horizon_wis_df$improvement[i]),
-                if(horizon_wis_df$improvement[i] > 0) "BETTER" else "WORSE"))
-  }
-  
-  # Display summary table
-  datatable(
-    horizon_wis_df %>%
-      select(horizon, n_locations, baseline_wis, twostage_wis, relative_wis, improvement) %>%
-      mutate(
-        horizon = paste0("Horizon ", horizon, " (", horizon, " week", ifelse(horizon > 1, "s", ""), " ahead)")
-      ),
-    caption = "Relative WIS by Horizon (Log-transformed data, Geometric mean, excluding PR and US)",
-    options = list(
-      pageLength = 5,
-      dom = 't',
-      columnDefs = list(list(className = 'dt-center', targets = "_all"))
-    ),
-    rownames = FALSE,
-    colnames = c("Horizon", "Locations", "Baseline WIS", "Adaptive Ensemble WIS", "Relative WIS", "Improvement %")
-  ) %>%
-    formatRound(columns = c("baseline_wis", "twostage_wis", "relative_wis", "improvement"), digits = 3)
-}
-```
-
-# Total Combined Relative WIS
-
-```{r total-wis}
-# Calculate total combined WIS across all horizons and locations
-cat("Calculating total combined relative WIS across all horizons...\n\n")
-
-all_wis_data <- list()
-
-for (h in available_horizons) {
-  baseline_key <- paste0("baseline_h", h)
-  twostage_key <- paste0("twostage_h", h)
-  
-  if (!is.null(models_data[[baseline_key]]) && !is.null(models_data[[twostage_key]])) {
-    # Combine data
-    h_data <- bind_rows(models_data[[baseline_key]], models_data[[twostage_key]])
-    
-    # Convert dates
-    h_data$reference_date <- as.Date(h_data$reference_date)
-    h_data$target_end_date <- as.Date(h_data$target_end_date)
-    
-    # Get actual values
-    h_truth <- h_data %>%
-      select(target_end_date, location) %>%
-      distinct() %>%
-      left_join(actual_data_display, by = c("target_end_date" = "date", "location" = "location"))
-    
-    # Prepare WIS data with log transformation per CDC methodology
-    wis_ready <- h_data %>%
-      filter(output_type == 'quantile') %>%
-      mutate(
-        output_type_id = as.numeric(output_type_id),
-        value = as.numeric(value)
-      ) %>%
-      left_join(h_truth %>% select(target_end_date, location, actual_value),
-                by = c("target_end_date", "location")) %>%
-      filter(!is.na(actual_value)) %>%
-      mutate(
-        # Apply log transformation (log(x + 1) to handle zeros)
-        value_log = log(value + 1),
-        actual_value_log = log(actual_value + 1),
-        horizon = h
-      ) %>%
-      select(model, location, reference_date, target_end_date, actual_value_log, 
-             output_type_id, value_log, horizon) %>%
-      rename(
-        prediction = value_log,
-        true_value = actual_value_log,
-        quantile = output_type_id
-      )
-    
-    all_wis_data[[h]] <- wis_ready
-  }
-}
-
-# Combine all horizons
-combined_wis_data <- bind_rows(all_wis_data)
-
-if (nrow(combined_wis_data) > 0) {
-  # Calculate WIS scores
-  wis_scores <- combined_wis_data %>%
-    score()
-  
-  # Find locations that both models have
-  common_locations <- wis_scores %>%
-    group_by(location, model) %>%
-    summarise(n = n(), .groups = "drop") %>%
-    group_by(location) %>%
-    summarise(n_models = n_distinct(model), .groups = "drop") %>%
-    filter(n_models == 2) %>%
-    pull(location)
-  
-  # Exclude Puerto Rico (72) and US national level per CDC methodology
-  common_locations <- common_locations[!common_locations %in% c("72", "US")]
-  
-  # Filter to only common locations for fair comparison
-  wis_scores_common <- wis_scores %>%
-    filter(location %in% common_locations)
-  
-  # Calculate geometric mean WIS by location first
-  wis_by_loc_model <- wis_scores_common %>%
-    group_by(model, location) %>%
-    summarise(
-      mean_wis_loc = mean(interval_score, na.rm = TRUE),
-      .groups = "drop"
-    )
-  
-  # Overall WIS using geometric mean across locations (CDC methodology)
-  overall_wis <- wis_by_loc_model %>%
-    group_by(model) %>%
-    summarise(
-      n_locations = n_distinct(location),
-      # Geometric mean = exp(mean(log(x)))
-      geometric_mean_wis = exp(mean(log(mean_wis_loc), na.rm = TRUE)),
-      arithmetic_mean_wis = mean(mean_wis_loc, na.rm = TRUE),
-      .groups = "drop"
-    )
-  
-  # Also keep simple count statistics
-  overall_stats <- wis_scores_common %>%
-    group_by(model) %>%
-    summarise(
-      n_forecasts = n(),
-      median_wis = median(interval_score, na.rm = TRUE),
-      .groups = "drop"
-    )
-  
-  overall_wis <- overall_wis %>%
-    left_join(overall_stats, by = "model")
-  
-  # Calculate relative WIS using geometric means
-  baseline_wis <- overall_wis$geometric_mean_wis[overall_wis$model == "FluSight-baseline"]
-  twostage_wis <- overall_wis$geometric_mean_wis[overall_wis$model == "TwoStage-AdaptiveEnsemble"]
-  
-  if (length(baseline_wis) > 0 && length(twostage_wis) > 0) {
-    relative_wis_total <- twostage_wis / baseline_wis
-    
-    cat("TOTAL COMBINED RELATIVE WIS (All Horizons and Locations):\n")
-    cat("==========================================================\n\n")
-    cat("Note: WIS calculated on log-transformed data per CDC methodology\n")
-    cat("      Excludes Puerto Rico and US national level\n")
-    cat(sprintf("Number of locations compared: %d (50 states + DC)\n", length(common_locations)))
-    cat(sprintf("FluSight-baseline Geometric Mean WIS: %.2f\n", baseline_wis))
-    cat(sprintf("TwoStage-AdaptiveEnsemble Geometric Mean WIS: %.2f\n", twostage_wis))
-    cat(sprintf("\nTwoStage-AdaptiveEnsemble Relative WIS: %.4f\n", relative_wis_total))
-    cat(sprintf("Performance: %.1f%% %s than baseline\n\n", 
-                abs(1 - relative_wis_total) * 100,
-                if(relative_wis_total < 1) "BETTER" else "WORSE"))
-    
-    # Display summary table
-    overall_wis$relative_to_baseline <- overall_wis$geometric_mean_wis / baseline_wis
-    
-    display_table <- overall_wis %>%
-      select(model, n_locations, n_forecasts, geometric_mean_wis, relative_to_baseline)
-    
-    datatable(
-      display_table,
-      caption = "Overall WIS Performance (Log-transformed data, Geometric mean across locations)",
-      options = list(
-        pageLength = 5,
-        dom = 't',
-        columnDefs = list(list(className = 'dt-center', targets = "_all"))
-      ),
-      rownames = FALSE,
-      colnames = c("Model", "Locations", "Forecasts", "Geometric Mean WIS", "Relative to Baseline")
-    ) %>%
-      formatRound(columns = c("geometric_mean_wis", "relative_to_baseline"), digits = 4)
-  }
-  
-  # Note: Per-horizon WIS already calculated and displayed above using geometric mean methodology
-}
-```
-
-# Forecast Visualizations by Horizon
-
-```{r h1-all-locations, fig.height=30, fig.width=16, eval=(1 %in% available_horizons)}
-# Process horizon 1 using facet approach
-if (1 %in% available_horizons) {
-  cat("## Horizon 1: One Week Ahead\n\n")
-  source("plot_functions.R")
-  # Combine baseline and adaptive ensemble data for plotting
-  combined_h1 <- bind_rows(
-    models_data[["baseline_h1"]],
-    models_data[["twostage_h1"]]
-  )
-  p1 <- create_horizon_facet_plot_adaptive(combined_h1, 
-                                  actual_data_display, 1, location_mapping)
-  if (!is.null(p1)) print(p1)
-}
-```
-
-```{r h2-all-locations, fig.height=30, fig.width=16, eval=(2 %in% available_horizons)}
-# Process horizon 2 using facet approach
-if (2 %in% available_horizons) {
-  cat("## Horizon 2: Two Weeks Ahead\n\n")
-  source("plot_functions.R")
-  # Combine baseline and adaptive ensemble data for plotting
-  combined_h2 <- bind_rows(
-    models_data[["baseline_h2"]],
-    models_data[["twostage_h2"]]
-  )
-  p2 <- create_horizon_facet_plot_adaptive(combined_h2, 
-                                  actual_data_display, 2, location_mapping)
-  if (!is.null(p2)) print(p2)
-}
-```
-
-```{r h3-all-locations, fig.height=30, fig.width=16, eval=(3 %in% available_horizons)}
-# Process horizon 3 using facet approach
-if (3 %in% available_horizons) {
-  cat("## Horizon 3: Three Weeks Ahead\n\n")
-  source("plot_functions.R")
-  # Combine baseline and adaptive ensemble data for plotting
-  combined_h3 <- bind_rows(
-    models_data[["baseline_h3"]],
-    models_data[["twostage_h3"]]
-  )
-  p3 <- create_horizon_facet_plot_adaptive(combined_h3, 
-                                  actual_data_display, 3, location_mapping)
-  if (!is.null(p3)) print(p3)
-}
-```
-
-```{r h4-all-locations, fig.height=30, fig.width=16, eval=(4 %in% available_horizons)}
-# Process horizon 4 using facet approach
-if (4 %in% available_horizons) {
-  cat("## Horizon 4: Four Weeks Ahead\n\n")
-  source("plot_functions.R")
-  # Combine baseline and adaptive ensemble data for plotting
-  combined_h4 <- bind_rows(
-    models_data[["baseline_h4"]],
-    models_data[["twostage_h4"]]
-  )
-  p4 <- create_horizon_facet_plot_adaptive(combined_h4, 
-                                  actual_data_display, 4, location_mapping)
-  if (!is.null(p4)) print(p4)
-}
-```
-
-# Detailed Performance Metrics
-
-## Point Forecast Metrics (All Horizons)
-
-```{r point-metrics-all}
-# Calculate comprehensive metrics for all horizons
-all_metrics <- list()
-
-for (h in available_horizons) {
-  baseline_key <- paste0("baseline_h", h)
-  twostage_key <- paste0("twostage_h", h)
-  
-  if (!is.null(models_data[[baseline_key]]) && !is.null(models_data[[twostage_key]])) {
-    h_data <- bind_rows(models_data[[baseline_key]], models_data[[twostage_key]])
-    h_data$reference_date <- as.Date(h_data$reference_date)
-    h_data$target_end_date <- as.Date(h_data$target_end_date)
-    
-    h_plot_data <- h_data %>%
-      group_by(model) %>%
-      do(prepare_quantile_data(.)) %>%
-      ungroup()
-    
-    h_truth <- h_plot_data %>%
-      select(target_end_date, location) %>%
-      distinct() %>%
-      left_join(actual_data_display, by = c("target_end_date" = "date", "location" = "location"))
-    
-    h_plot_data <- h_plot_data %>%
-      left_join(h_truth %>% select(target_end_date, location, actual_value),
-                by = c("target_end_date", "location"))
-    
-    h_metrics <- h_plot_data %>%
-      filter(!is.na(actual_value)) %>%
-      group_by(model, location) %>%
-      summarise(
-        horizon = h,
-        n_forecasts = n(),
-        mae = mean(abs(actual_value - median), na.rm = TRUE),
-        rmse = sqrt(mean((actual_value - median)^2, na.rm = TRUE)),
-        mape = mean(abs((actual_value - median) / pmax(actual_value, 1)) * 100, na.rm = TRUE),
-        correlation = if(n() > 1) cor(actual_value, median, use = "complete.obs") else NA,
-        bias = mean(median - actual_value, na.rm = TRUE),
-        .groups = "drop"
-      )
-    
-    all_metrics[[h]] <- h_metrics
-  }
-}
-
-combined_metrics <- bind_rows(all_metrics)
-
-# Overall summary
-model_summary <- combined_metrics %>%
-  group_by(model, horizon) %>%
-  summarise(
-    n_locations = n_distinct(location),
-    avg_mae = mean(mae, na.rm = TRUE),
-    avg_rmse = mean(rmse, na.rm = TRUE),
-    avg_mape = mean(mape, na.rm = TRUE),
-    avg_correlation = mean(correlation, na.rm = TRUE),
-    avg_bias = mean(bias, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(across(where(is.numeric) & !c(horizon, n_locations), round, 3))
-
-datatable(
-  model_summary,
-  caption = "Average Performance Metrics by Model and Horizon",
-  options = list(
-    pageLength = 10,
-    scrollX = TRUE,
-    columnDefs = list(list(className = 'dt-center', targets = "_all"))
-  ),
-  rownames = FALSE
-)
-```
-
-## WIS by Location
-
-```{r wis-by-location}
-if (nrow(combined_wis_data) > 0) {
-  # WIS by model and location - keeping n_forecasts
-  # Using wis_scores_common which already excludes PR and US
-  wis_by_location_raw <- wis_scores_common %>%
-    group_by(model, location) %>%
-    summarise(
-      n_forecasts = n(),
-      mean_wis = mean(interval_score, na.rm = TRUE),
-      .groups = "drop"
-    )
-  
-  # Check what locations each model has
-  baseline_locations <- wis_by_location_raw %>% 
-    filter(model == "FluSight-baseline") %>% 
-    select(location, baseline_wis = mean_wis, baseline_n = n_forecasts)
-  
-  twostage_locations <- wis_by_location_raw %>% 
-    filter(model == "TwoStage-AdaptiveEnsemble") %>% 
-    select(location, twostage_wis = mean_wis, twostage_n = n_forecasts)
-  
-  # Join only where both models have data
-  wis_by_location <- baseline_locations %>%
-    inner_join(twostage_locations, by = "location") %>%
-    mutate(
-      state = ifelse(location %in% names(location_mapping), 
-                    location_mapping[location], 
-                    paste("Location", location)),
-      `FluSight-baseline` = baseline_wis,
-      `TwoStage-AdaptiveEnsemble` = twostage_wis,
-      relative_wis = twostage_wis / baseline_wis,
-      improvement = (1 - relative_wis) * 100
-    ) %>%
-    arrange(desc(improvement))
-  
-  # Top performers
-  cat("\nTOP 10 LOCATIONS WHERE TwoStage-AdaptiveEnsemble OUTPERFORMS BASELINE:\n")
-  cat("========================================================================\n\n")
-  top_10 <- head(wis_by_location, 10)
-  print(kable(top_10 %>% select(state, `FluSight-baseline`, `TwoStage-AdaptiveEnsemble`, relative_wis, improvement), 
-              digits = 2, col.names = c("Location", "Baseline WIS", "Adaptive Ensemble WIS", "Relative WIS", "Improvement %")))
-  
-  # Bottom performers
-  cat("\n\nLOCATIONS WHERE BASELINE PERFORMS BETTER:\n")
-  cat("==========================================\n\n")
-  bottom_performers <- wis_by_location %>% filter(improvement < 0) %>% head(10)
-  if (nrow(bottom_performers) > 0) {
-    print(kable(bottom_performers %>% select(state, `FluSight-baseline`, `TwoStage-AdaptiveEnsemble`, relative_wis, improvement), 
-                digits = 2, col.names = c("Location", "Baseline WIS", "Adaptive Ensemble WIS", "Relative WIS", "Improvement %")))
-  } else {
-    cat("TwoStage-AdaptiveEnsemble outperforms baseline in all locations!\n")
-  }
-  
-  # Full location table
-  datatable(
-    wis_by_location %>% select(state, location, `FluSight-baseline`, `TwoStage-AdaptiveEnsemble`, relative_wis, improvement),
-    caption = "WIS Performance by Location (All Horizons Combined)",
-    options = list(
-      pageLength = 20,
-      scrollX = TRUE,
-      columnDefs = list(list(className = 'dt-center', targets = "_all"))
-    ),
-    rownames = FALSE
-  ) %>%
-    formatRound(columns = c("FluSight-baseline", "TwoStage-AdaptiveEnsemble", "relative_wis", "improvement"), digits = 2)
-}
-```
-
-## Coverage Analysis
-
-```{r coverage-all-horizons}
-# Calculate coverage for all horizons
-coverage_results <- list()
-
-for (h in available_horizons) {
-  baseline_key <- paste0("baseline_h", h)
-  twostage_key <- paste0("twostage_h", h)
-  
-  if (!is.null(models_data[[baseline_key]]) && !is.null(models_data[[twostage_key]])) {
-    h_data <- bind_rows(models_data[[baseline_key]], models_data[[twostage_key]])
-    h_data$reference_date <- as.Date(h_data$reference_date)
-    h_data$target_end_date <- as.Date(h_data$target_end_date)
-    
-    h_plot_data <- h_data %>%
-      group_by(model) %>%
-      do(prepare_quantile_data(.)) %>%
-      ungroup()
-    
-    h_truth <- h_plot_data %>%
-      select(target_end_date, location) %>%
-      distinct() %>%
-      left_join(actual_data_display, by = c("target_end_date" = "date", "location" = "location"))
-    
-    h_plot_data <- h_plot_data %>%
-      left_join(h_truth %>% select(target_end_date, location, actual_value),
-                by = c("target_end_date", "location"))
-    
-    h_coverage <- h_plot_data %>%
-      filter(!is.na(actual_value)) %>%
-      group_by(model) %>%
-      summarise(
-        horizon = h,
-        n_forecasts = n(),
-        coverage_50 = mean(actual_value >= q25 & actual_value <= q75, na.rm = TRUE) * 100,
-        coverage_90 = mean(actual_value >= q05 & actual_value <= q95, na.rm = TRUE) * 100,
-        coverage_98 = mean(actual_value >= q01 & actual_value <= q99, na.rm = TRUE) * 100,
-        .groups = "drop"
-      )
-    
-    coverage_results[[h]] <- h_coverage
-  }
-}
-
-combined_coverage <- bind_rows(coverage_results)
-
-datatable(
-  combined_coverage,
-  caption = "Empirical Coverage of Prediction Intervals (%) by Horizon",
-  options = list(
-    pageLength = 10,
-    scrollX = TRUE,
-    columnDefs = list(list(className = 'dt-center', targets = "_all"))
-  ),
-  rownames = FALSE
-) %>%
-  formatRound(columns = c("coverage_50", "coverage_90", "coverage_98"), digits = 1)
-
-# Overall coverage summary
-overall_coverage <- combined_coverage %>%
-  group_by(model) %>%
-  summarise(
-    total_forecasts = sum(n_forecasts),
-    avg_coverage_50 = weighted.mean(coverage_50, n_forecasts),
-    avg_coverage_90 = weighted.mean(coverage_90, n_forecasts),
-    avg_coverage_98 = weighted.mean(coverage_98, n_forecasts),
-    .groups = "drop"
-  )
-
-cat("\n\nOVERALL COVERAGE SUMMARY (All Horizons):\n")
-cat("=========================================\n\n")
-print(kable(overall_coverage, digits = 1))
-```
-
-# Key Findings
-
-```{r summary}
-cat("\nKEY PERFORMANCE INDICATOR:\n")
-cat("==========================\n\n")
-
-if (exists("relative_wis_total")) {
-  cat(sprintf("Total Combined Relative WIS: %.4f\n", relative_wis_total))
-  cat(sprintf("TwoStage-AdaptiveEnsemble is %.1f%% %s than baseline overall\n\n", 
-              abs(1 - relative_wis_total) * 100,
-              if(relative_wis_total < 1) "better" else "worse"))
-}
-```
-
----
-
-# Technical Details
-
-## Data Description
-- **Forecast Period**: Retrospective out-of-sample evaluation
-- **Models**: TwoStage-AdaptiveEnsemble (Weighted average of saved models) vs FluSight-baseline (CDC persistence)
-- **Ensemble Method**: Adaptive weighted average based on preceding 4-week WIS performance
-- **Available Horizons**: `r paste(available_horizons, collapse = ", ")` weeks ahead
-- **Evaluation Scope**: 50 US states + DC (excludes Puerto Rico and US national level per CDC methodology)
-- **Quantiles**: 23 standard CDC FluSight quantiles
-
-## Metrics Explained
-- **WIS (Weighted Interval Score)**: Proper scoring rule for quantile forecasts
-  - Calculated on log-transformed data (log(count + 1)) per CDC methodology
-  - Minimizes impact of count magnitude across jurisdictions
-- **Relative WIS**: Ratio of geometric mean WIS (model) to geometric mean WIS (baseline)
-  - Values < 1 indicate better performance than baseline
-  - Uses geometric mean across locations for fair comparison
-- **MAE/RMSE**: Point forecast accuracy metrics (on original scale)
-- **Coverage**: Empirical coverage of prediction intervals
-
-## Visualization Legend
-- **Black line/points**: Actual observed hospitalizations
-- **Purple bands**: FluSight-baseline prediction intervals (dashed median)
-- **Orange bands**: TwoStage-AdaptiveEnsemble prediction intervals (solid median)
-- **Band opacity**: Darker = narrower interval (50%), lighter = wider (90%, 98%)
-
-## Adaptive Ensemble Methodology
-The adaptive ensemble forecast is created by:
-1. For each reference date and horizon, calculating model weights based on WIS performance over the preceding 4 weeks
-2. Weights are inversely proportional to average WIS (better performance = higher weight)
-3. Weights are calculated separately for each horizon to capture horizon-specific model strengths
-4. The weighted average is computed for each quantile level across all models
-5. This approach maintains prospective validity - no future information is used in weight calculation
-
-Key advantages:
-- Adapts to changing model performance over time
-- Accounts for horizon-specific model strengths
-- Typically provides better calibration than static ensembles
-- Maintains real-time feasibility (only uses past data)
-
----
 
 Generated on: `r Sys.time()`
 
----
-
 # Retrospective WIS Evaluation (Pipeline Outputs)
 
-```{r pipeline-wis, eval=TRUE}
-library(dplyr); library(readr); library(lubridate); library(tidyr)
-
+```{r pipeline-wis}
 EVAL_START <- as.Date('2025-07-01')
 
-# Latest actuals (stitched)
+# Helper: latest file in a directory by pattern
 latest_file <- function(dir, pattern) {
   files <- list.files(dir, pattern = pattern, full.names = TRUE)
   if (length(files) == 0) return(NA_character_)
   files[order(files)][length(files)]
 }
 
-actual_path <- latest_file('data/imputed_sets', '^imputed_and_stitched_hosp_\\d{4}-\\d{2}-\\d{2}\\.csv$')
-if (is.na(actual_path)) stop('No stitched actuals found')
+# Load latest actuals
+actual_path <- latest_file('../data/imputed_sets', '^imputed_and_stitched_hosp_\\d{4}-\\d{2}-\\d{2}\\.csv$')
+stopifnot(!is.na(actual_path))
 actual_raw <- read_csv(actual_path, show_col_types = FALSE)
 
 # Map location_name -> FIPS
@@ -1417,53 +59,124 @@ location_to_fips <- c(
   'Washington'='53','West Virginia'='54','Wisconsin'='55','Wyoming'='56','US'='US'
 )
 
-actual_data <- actual_raw %>%
+actual_data_full <- actual_raw %>%
   transmute(location = location_to_fips[location_name], date = as.Date(date), actual_value = total_hosp) %>%
-  filter(!is.na(location), date >= EVAL_START)
+  filter(!is.na(location))
 
-# Helper to load a model file
+# For evaluation summaries only (not used for weighting), restrict to EVAL_START+
+actual_data <- actual_data_full %>% filter(date >= EVAL_START)
+
+# Load model retrospective files for h=1..4
 load_model <- function(path, model_name, h){
   if (!file.exists(path)) return(NULL)
   df <- read_csv(path, show_col_types = FALSE)
   df$model <- model_name
   df$h <- h
-  df <- df %>% mutate(
-    reference_date = as.Date(reference_date),
-    target_end_date = as.Date(target_end_date)
-  )
+  df <- df %>% mutate(reference_date = as.Date(reference_date), target_end_date = as.Date(target_end_date))
   df
 }
 
 all_models <- list()
 for (h in 1:4) {
-  baseline <- load_model(sprintf('forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', h), 'FluSight-baseline', h)
-  arima <- load_model(sprintf('forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv', h), 'ARIMA', h)
-  lgbm  <- load_model(sprintf('forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h%d_forecasts.csv', h), 'LGBM', h)
-  svm   <- load_model(sprintf('forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', h), 'SVM', h)
+  baseline_path_top <- sprintf('../forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', h)
+  baseline_path_alt <- sprintf('../forecasts/retrospective/lgbm_enhanced_t10/Flusight-baseline_h%d_forecasts.csv', h)
+  baseline_path <- if (file.exists(baseline_path_top)) baseline_path_top else baseline_path_alt
+  baseline <- load_model(baseline_path, 'FluSight-baseline', h)
+  arima <- load_model(sprintf('../forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv', h), 'ARIMA', h)
+  lgbm  <- load_model(sprintf('../forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h%d_forecasts.csv', h), 'LGBM', h)
+  svm   <- load_model(sprintf('../forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', h), 'SVM', h)
   dfs <- list(baseline, arima, lgbm, svm)
   dfs <- dfs[!sapply(dfs, is.null)]
   if (length(dfs) > 0) all_models[[paste0('h', h)]] <- bind_rows(dfs)
 }
 
-if (length(all_models) == 0) stop('No retrospective forecast files found')
-retros <- bind_rows(all_models) %>% filter(as.Date(target_end_date) >= EVAL_START)
+stopifnot(length(all_models) > 0)
+ret_all <- bind_rows(all_models)
 
-# WIS function (CDC-style on log scale)
+# WIS function (log scale) used for weighting and evaluation
 calculate_wis_single <- function(qvals, qlevels, actual_value){
   qlog <- log(as.numeric(qvals) + 1)
   alog <- log(as.numeric(actual_value) + 1)
   alphas <- unique(c(qlevels[qlevels <= 0.5], 1 - qlevels[qlevels > 0.5]))
   alphas <- alphas[alphas > 0]
-  scores <- sapply(alphas, function(a){
-    li <- which.min(abs(qlevels - a))
-    ui <- which.min(abs(qlevels - (1 - a)))
+  mean(sapply(alphas, function(a){
+    li <- which.min(abs(qlevels - a)); ui <- which.min(abs(qlevels - (1 - a)))
     L <- qlog[li]; U <- qlog[ui]
     width <- U - L
     pen <- if (alog < L) (2/a) * (L - alog) else if (alog > U) (2/a) * (alog - U) else 0
     width + pen
-  })
-  mean(scores)
+  }))
 }
+
+# Build retrospective AdaptiveEnsemble from ARIMA/LGBM/SVM using prior 4 weeks per horizon
+build_weights <- function(df_h, ref_date, lookback_weeks = 4) {
+  # df_h: rows for a single horizon with columns: model, reference_date, target_end_date, location, output_type, output_type_id, value
+  # Use only ARIMA/LGBM/SVM
+  cand <- df_h %>% filter(model %in% c('ARIMA','LGBM','SVM'), output_type=='quantile')
+  prev_refs <- sort(unique(cand$reference_date))
+  prev_refs <- prev_refs[prev_refs < ref_date]
+  if (length(prev_refs) == 0) return(setNames(rep(1/3, 3), c('ARIMA','LGBM','SVM')))
+  eval_refs <- tail(prev_refs, lookback_weeks)
+  # Compute WIS per model over eval_refs
+  wis_by_model <- cand %>%
+    filter(reference_date %in% eval_refs) %>%
+    mutate(output_type_id = as.numeric(output_type_id)) %>%
+    group_by(model, reference_date, target_end_date, location) %>%
+    summarise(quantile_values = list(value), quantile_levels = list(output_type_id), .groups='drop') %>%
+    # Use full history so weights can be computed just before EVAL_START
+    left_join(actual_data_full, by=c('target_end_date'='date','location'='location')) %>%
+    filter(!is.na(actual_value)) %>%
+    rowwise() %>%
+    mutate(wis = calculate_wis_single(unlist(quantile_values), unlist(quantile_levels), actual_value)) %>%
+    ungroup() %>%
+    group_by(model) %>%
+    summarise(mean_wis = mean(wis, na.rm=TRUE), .groups='drop')
+  models <- intersect(c('ARIMA','LGBM','SVM'), wis_by_model$model)
+  if (length(models) == 0 || any(!is.finite(wis_by_model$mean_wis))) {
+    return(setNames(rep(1/3, 3), c('ARIMA','LGBM','SVM')))
+  }
+  inv <- 1 / wis_by_model$mean_wis
+  w <- inv / sum(inv)
+  out <- setNames(rep(0, 3), c('ARIMA','LGBM','SVM'))
+  out[wis_by_model$model] <- w
+  out
+}
+
+build_ensemble_for_h <- function(ret_h) {
+  # ret_h: rows for a single horizon across all models (including baseline)
+  # We will produce model == 'AdaptiveEnsemble' rows using ARIMA/LGBM/SVM only
+  cand <- ret_h %>% filter(model %in% c('ARIMA','LGBM','SVM'), output_type=='quantile')
+  if (nrow(cand) == 0) return(NULL)
+  ref_dates <- sort(unique(cand$reference_date))
+  ens_list <- list()
+  for (rd in ref_dates) {
+    w <- build_weights(ret_h, rd, lookback_weeks = 4)
+    # Combine forecasts at this ref date across models using weights
+    comb <- cand %>%
+      filter(reference_date == rd) %>%
+      mutate(w = case_when(model=='ARIMA' ~ w['ARIMA'], model=='LGBM' ~ w['LGBM'], model=='SVM' ~ w['SVM'], TRUE ~ 0)) %>%
+      group_by(reference_date, target_end_date, location, output_type_id) %>%
+      summarise(value = ifelse(sum(w, na.rm=TRUE) > 0, sum(value * w, na.rm=TRUE) / sum(w, na.rm=TRUE), mean(value, na.rm=TRUE)), .groups='drop') %>%
+      mutate(output_type = 'quantile', model = 'AdaptiveEnsemble')
+    ens_list[[as.character(rd)]] <- comb
+  }
+  bind_rows(ens_list)
+}
+
+ens_all <- list()
+for (h in sort(unique(ret_all$h))) {
+  ret_h <- ret_all %>% filter(h == !!h)
+  ens_h <- build_ensemble_for_h(ret_h)
+  if (!is.null(ens_h) && nrow(ens_h) > 0) {
+    ens_h$h <- h
+    ens_all[[paste0('h', h)]] <- ens_h
+  }
+}
+
+ens_all_df <- if (length(ens_all) > 0) bind_rows(ens_all) else NULL
+
+retros <- if (!is.null(ens_all_df)) bind_rows(ret_all, ens_all_df) else ret_all
+retros <- retros %>% filter(as.Date(target_end_date) >= EVAL_START)
 
 # Compute WIS per horizon
 wis_scores_all <- list()
@@ -1483,27 +196,55 @@ for (h in sort(unique(retros$h))) {
 
 wis_scores_all_df <- bind_rows(wis_scores_all) %>% filter(!(location %in% c('72','US')))
 
-# Per-horizon geometric mean WIS and relative WIS (model vs baseline)
-per_horizon_summary <- wis_scores_all_df %>%
+# Ensure identical date/location sets across models within each horizon
+wis_common_list <- list()
+for (hh in sort(unique(wis_scores_all_df$h))) {
+  sub <- wis_scores_all_df %>% filter(h == !!hh)
+  models_present <- unique(sub$model)
+  keys <- sub %>%
+    group_by(location, target_end_date) %>%
+    summarise(n_models = n_distinct(model), .groups='drop') %>%
+    filter(n_models == length(models_present)) %>%
+    select(location, target_end_date)
+  sub_common <- sub %>% inner_join(keys, by=c('location','target_end_date'))
+  wis_common_list[[paste0('h', hh)]] <- sub_common
+}
+
+wis_scores_common <- bind_rows(wis_common_list)
+
+# Per-horizon geometric mean WIS and relative WIS
+wis_by_model <- wis_scores_common %>%
   group_by(h, model, location) %>%
   summarise(mean_wis_loc = mean(interval_score, na.rm=TRUE), .groups='drop') %>%
   group_by(h, model) %>%
-  summarise(geometric_mean_wis = exp(mean(log(mean_wis_loc), na.rm=TRUE)), .groups='drop') %>%
+  summarise(geometric_mean_wis = exp(mean(log(mean_wis_loc), na.rm=TRUE)), .groups='drop')
+
+per_horizon_summary <- wis_by_model %>%
   group_by(h) %>%
-  mutate(relative_wis = geometric_mean_wis / geometric_mean_wis[model == 'FluSight-baseline']) %>%
+  mutate(baseline_gmw = dplyr::first(geometric_mean_wis[model == 'FluSight-baseline'])) %>%
+  mutate(relative_wis = ifelse(!is.na(baseline_gmw) & baseline_gmw > 0,
+                               geometric_mean_wis / baseline_gmw,
+                               NA_real_)) %>%
+  select(-baseline_gmw) %>%
   ungroup()
 
-cat("\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (>= 2025-07-01):\n")
-print(per_horizon_summary)
+cat("\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (>= 2025-07-01):\n\n")
+print(knitr::kable(per_horizon_summary, digits = 4))
 
-# Combined across horizons (all WIS pooled)
-combined_summary <- wis_scores_all_df %>%
+# Combined across horizons
+combined_by_model <- wis_scores_common %>%
   group_by(model, location) %>%
   summarise(mean_wis_loc = mean(interval_score, na.rm=TRUE), .groups='drop') %>%
   group_by(model) %>%
-  summarise(geometric_mean_wis = exp(mean(log(mean_wis_loc), na.rm=TRUE)), .groups='drop') %>%
-  mutate(relative_wis = geometric_mean_wis / geometric_mean_wis[model == 'FluSight-baseline'])
+  summarise(geometric_mean_wis = exp(mean(log(mean_wis_loc), na.rm=TRUE)), .groups='drop')
 
-cat("\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (All horizons, >= 2025-07-01):\n")
-print(combined_summary)
+combined_summary <- combined_by_model %>%
+  mutate(baseline_gmw = dplyr::first(geometric_mean_wis[model == 'FluSight-baseline'])) %>%
+  mutate(relative_wis = ifelse(!is.na(baseline_gmw) & baseline_gmw > 0,
+                               geometric_mean_wis / baseline_gmw,
+                               NA_real_)) %>%
+  select(-baseline_gmw)
+
+cat("\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (All horizons, >= 2025-07-01):\n\n")
+print(knitr::kable(combined_summary, digits = 4))
 ```
