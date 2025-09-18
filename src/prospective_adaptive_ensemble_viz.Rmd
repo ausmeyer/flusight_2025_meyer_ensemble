@@ -1,0 +1,128 @@
+---
+title: "Prospective Adaptive Ensemble Visualization"
+subtitle: "Ground truth since 2024-07-01 with prospective ensemble bands"
+author: "Prospective Ensemble"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: false
+    code_folding: hide
+    fig_width: 14
+    fig_height: 8
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 14,
+  fig.height = 8
+)
+
+library(dplyr)
+library(readr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+```
+
+```{r load-data}
+# Helper: latest by pattern
+latest_file <- function(dir, pattern) {
+  files <- list.files(dir, pattern = pattern, full.names = TRUE)
+  if (length(files) == 0) return(NA_character_)
+  files[order(files)][length(files)]
+}
+
+# Locate latest actuals and prospective ensemble
+actual_path <- latest_file('../data/imputed_sets', '^imputed_and_stitched_hosp_\\d{4}-\\d{2}-\\d{2}\\.csv$')
+prospective_path <- latest_file('../forecasts/prospective', '^AdaptiveEnsemble_prospective_\\d{8}\\.csv$')
+
+if (is.na(actual_path)) stop('No stitched actuals found in data/imputed_sets')
+if (is.na(prospective_path)) stop('No prospective adaptive ensemble found in forecasts/prospective')
+
+actual_raw <- read_csv(actual_path, show_col_types = FALSE)
+prospective <- read_csv(prospective_path, show_col_types = FALSE)
+
+# Prepare ground truth (since 2024-07-01)
+actual <- actual_raw %>%
+  select(location_name, date, total_hosp) %>%
+  mutate(date = as.Date(date)) %>%
+  filter(date >= as.Date('2024-07-01')) %>%
+  arrange(location_name, date)
+
+# FIPS -> name mapping for annotations
+fips_to_name <- c(
+  '01' = 'Alabama', '02' = 'Alaska', '04' = 'Arizona', '05' = 'Arkansas',
+  '06' = 'California', '08' = 'Colorado', '09' = 'Connecticut', '10' = 'Delaware',
+  '11' = 'District of Columbia', '12' = 'Florida', '13' = 'Georgia', '15' = 'Hawaii',
+  '16' = 'Idaho', '17' = 'Illinois', '18' = 'Indiana', '19' = 'Iowa',
+  '20' = 'Kansas', '21' = 'Kentucky', '22' = 'Louisiana', '23' = 'Maine',
+  '24' = 'Maryland', '25' = 'Massachusetts', '26' = 'Michigan', '27' = 'Minnesota',
+  '28' = 'Mississippi', '29' = 'Missouri', '30' = 'Montana', '31' = 'Nebraska',
+  '32' = 'Nevada', '33' = 'New Hampshire', '34' = 'New Jersey', '35' = 'New Mexico',
+  '36' = 'New York', '37' = 'North Carolina', '38' = 'North Dakota', '39' = 'Ohio',
+  '40' = 'Oklahoma', '41' = 'Oregon', '42' = 'Pennsylvania', '72' = 'Puerto Rico',
+  '44' = 'Rhode Island', '45' = 'South Carolina', '46' = 'South Dakota', '47' = 'Tennessee',
+  '48' = 'Texas', '49' = 'Utah', '50' = 'Vermont', '51' = 'Virginia',
+  '53' = 'Washington', '54' = 'West Virginia', '55' = 'Wisconsin', '56' = 'Wyoming',
+  'US' = 'US'
+)
+
+# Summarise quantiles across all horizons; keep ribbons per target_end_date
+prospective_q <- prospective %>%
+  filter(output_type == 'quantile') %>%
+  mutate(output_type_id = as.numeric(output_type_id),
+         target_end_date = as.Date(target_end_date)) %>%
+  group_by(location, target_end_date) %>%
+  summarise(
+    q01 = value[which.min(abs(output_type_id - 0.01))],
+    q05 = value[which.min(abs(output_type_id - 0.05))],
+    q25 = value[which.min(abs(output_type_id - 0.25))],
+    median = value[which.min(abs(output_type_id - 0.5))],
+    q75 = value[which.min(abs(output_type_id - 0.75))],
+    q95 = value[which.min(abs(output_type_id - 0.95))],
+    q99 = value[which.min(abs(output_type_id - 0.99))],
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    q01 = pmin(q01, q05, q25, median, na.rm = TRUE),
+    q05 = pmin(q05, q25, median, na.rm = TRUE),
+    q25 = pmin(q25, median, na.rm = TRUE),
+    q75 = pmax(q75, median, na.rm = TRUE),
+    q95 = pmax(q95, q75, median, na.rm = TRUE),
+    q99 = pmax(q99, q95, q75, median, na.rm = TRUE)
+  ) %>%
+  mutate(location_name = fips_to_name[location])
+
+# Determine last actual date per location and keep forecasts strictly after that
+last_actual <- actual %>% group_by(location_name) %>% summarise(last_date = max(date), .groups = 'drop')
+prospective_q <- prospective_q %>% left_join(last_actual, by = 'location_name') %>%
+  filter(target_end_date > last_date)
+```
+
+```{r plot, fig.height = 20, fig.width = 8, fig.align='center'}
+p <- ggplot() +
+  # Prospective bands
+  geom_ribbon(data = prospective_q, aes(x = target_end_date, ymin = q01, ymax = q99), fill = '#ffd9b3', alpha = 0.3) +
+  geom_ribbon(data = prospective_q, aes(x = target_end_date, ymin = q05, ymax = q95), fill = '#ffb366', alpha = 0.4) +
+  geom_ribbon(data = prospective_q, aes(x = target_end_date, ymin = q25, ymax = q75), fill = '#ff8c1a', alpha = 0.5) +
+  geom_line(data = prospective_q, aes(x = target_end_date, y = median), color = '#cc5200', linewidth = 0.2) +
+  geom_point(data = prospective_q, aes(x = target_end_date, y = median), color = '#cc5200', size = 0.2) +
+  
+  # Ground truth
+  geom_line(data = actual, aes(x = date, y = total_hosp), color = 'black', linewidth = 0.2) +
+  geom_point(data = actual, aes(x = date, y = total_hosp), color = 'black', size = 0.2, alpha = 0.6) +
+  
+  facet_wrap(~ location_name, scales = 'free_y', ncol = 3) +
+  theme_bw() +
+  labs(title = 'Prospective Adaptive Ensemble: Quantile Bands and History',
+       subtitle = 'Bands: 1-99 (light), 5-95 (med), 25-75 (dark). Median in orange. History since 2023-07-01.',
+       x = 'Date', y = 'Weekly incident flu hospitalizations') + 
+  theme_bw(base_size = 8)
+
+print(p)
+```
+

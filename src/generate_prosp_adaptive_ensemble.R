@@ -34,7 +34,9 @@ while (i <= length(args)) {
 if (!is.na(AS_OF_OVERRIDE)) {
   as_of_date <- as.Date(AS_OF_OVERRIDE)
 } else {
-  as_of_date <- floor_date(Sys.Date(), unit = "week", week_start = 7)
+  # Ensure we use the most recent Saturday (same-day if Saturday)
+  today <- Sys.Date()
+  as_of_date <- today - ((lubridate::wday(today) - 7) %% 7)
 }
 as_of_str  <- format(as_of_date, "%Y-%m-%d")
 as_of_ts   <- format(as_of_date, "%Y%m%d")
@@ -176,6 +178,8 @@ load_prosp_for_h <- function(h, ts) {
 
 dir.create('forecasts/prospective', showWarnings = FALSE, recursive = TRUE)
 
+all_ensembles <- list()
+
 for (h in 1:4) {
   retro_models <- load_retro_for_h(h)
   # Standardize minimal columns and ensure types
@@ -225,10 +229,20 @@ for (h in 1:4) {
         }
         if (wtot > 0) wsum / wtot else mean(vs, na.rm = TRUE)
       }, .groups = 'drop') %>%
-    mutate(horizon = 0, target = 'wk inc flu hosp') %>%
+    mutate(horizon = h - 1, target = 'wk inc flu hosp') %>%
     select(reference_date, horizon, target, target_end_date, location, output_type, output_type_id, value)
 
-  out_path <- file.path('forecasts/prospective', sprintf('AdaptiveEnsemble_h%d_prospective_%s.csv', h, as_of_ts))
-  write_csv(ensemble, out_path)
-  message(sprintf("Saved: %s (%d rows)", out_path, nrow(ensemble)))
+  all_ensembles[[paste0('h', h)]] <- ensemble
+}
+
+# Write a single final file combining all horizons
+if (length(all_ensembles) > 0) {
+  final_df <- bind_rows(all_ensembles)
+  # Ensure proper column order
+  final_df <- final_df %>% select(reference_date, horizon, target, target_end_date, location, output_type, output_type_id, value)
+  out_path <- file.path('forecasts/prospective', sprintf('AdaptiveEnsemble_prospective_%s.csv', as_of_ts))
+  write_csv(final_df, out_path)
+  message(sprintf('Saved final ensemble: %s (%d rows across %d horizons)', out_path, nrow(final_df), length(all_ensembles)))
+} else {
+  message('No ensemble output generated (no prospective files found for any horizon).')
 }

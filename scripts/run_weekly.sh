@@ -125,6 +125,10 @@ if [[ -n "$ENSEMBLE_HISTORY_WEEKS" ]]; then AE_ARGS+=(--history-weeks "$ENSEMBLE
 if [[ -n "$ENSEMBLE_INCLUDE_ARIMA" ]]; then AE_ARGS+=(--include-arima "$ENSEMBLE_INCLUDE_ARIMA"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_SVM" ]]; then AE_ARGS+=(--include-svm "$ENSEMBLE_INCLUDE_SVM"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM" ]]; then AE_ARGS+=(--include-lgbm "$ENSEMBLE_INCLUDE_LGBM"); fi
-Rscript src/generate_prosp_adaptive_ensemble.R "${AE_ARGS[@]}"
+if (( ${#AE_ARGS[@]} )); then
+  Rscript src/generate_prosp_adaptive_ensemble.R "${AE_ARGS[@]}"
+else
+  Rscript src/generate_prosp_adaptive_ensemble.R
+fi
 
 echo "==> Done. Outputs under forecasts/{retrospective,prospective}"

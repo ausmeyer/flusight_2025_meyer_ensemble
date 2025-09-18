@@ -27,7 +27,7 @@ fi
 echo "=================================================="
 
 # Create retrospective directory if it doesn't exist
-mkdir -p forecasts/retrospective
+mkdir -p forecasts/retrospective/svm_t100
 
 # Generate forecasts for each horizon
 for HORIZON in 1 2 3 4; do
@@ -41,7 +41,7 @@ for HORIZON in 1 2 3 4; do
     if [ ! -f "$HYPERPARAMS_FILE" ]; then
         HYPERPARAMS_FILE="models/svm_hyperparameters_h${HORIZON}_t${TRIALS}.pkl"
     fi
-    OUTPUT_FILE="forecasts/retrospective/svm_t${TRIALS}_h${HORIZON}.csv"
+    OUTPUT_FILE="forecasts/retrospective/svm_t100/svm_t${TRIALS}_h${HORIZON}.csv"
 
     # Check if hyperparameters file exists
     if [ ! -f "$HYPERPARAMS_FILE" ]; then
@@ -51,7 +51,7 @@ for HORIZON in 1 2 3 4; do
     fi
 
     # Use a temporary directory and then move the file
-    TEMP_DIR="forecasts/temp_h${HORIZON}"
+    TEMP_DIR="forecasts/retrospective/svm_t100/temp_h${HORIZON}"
 
     # Generate baseline for each horizon
     BASELINE_FLAG="--include-baseline"
@@ -113,10 +113,10 @@ echo "=================================================="
 echo "All Forecasts Generated!"
 echo "=================================================="
 echo ""
-echo "Forecast files saved in: forecasts/retrospective/"
+echo "Forecast files saved in: forecasts/retrospective/svm_t100/"
 echo "Files created:"
 for HORIZON in 1 2 3 4; do
-    OUTPUT_FILE="forecasts/retrospective/svm_t${TRIALS}_h${HORIZON}.csv"
+    OUTPUT_FILE="forecasts/retrospective/svm_t100/svm_t${TRIALS}_h${HORIZON}.csv"
     if [ -f "$OUTPUT_FILE" ]; then
         echo "  - $(basename $OUTPUT_FILE)"
     fi

@@ -19,7 +19,8 @@ knitr::opts_chunk$set(
   warning = FALSE, 
   message = FALSE,
   fig.width = 14,
-  fig.height = 8
+  fig.height = 8,
+  eval = FALSE   # disable old chunks; new evaluation chunk added below
 )
 
 # CONFIGURATION
@@ -1384,3 +1385,125 @@ Key advantages:
 ---
 
 Generated on: `r Sys.time()`
+
+---
+
+# Retrospective WIS Evaluation (Pipeline Outputs)
+
+```{r pipeline-wis, eval=TRUE}
+library(dplyr); library(readr); library(lubridate); library(tidyr)
+
+EVAL_START <- as.Date('2025-07-01')
+
+# Latest actuals (stitched)
+latest_file <- function(dir, pattern) {
+  files <- list.files(dir, pattern = pattern, full.names = TRUE)
+  if (length(files) == 0) return(NA_character_)
+  files[order(files)][length(files)]
+}
+
+actual_path <- latest_file('data/imputed_sets', '^imputed_and_stitched_hosp_\\d{4}-\\d{2}-\\d{2}\\.csv$')
+if (is.na(actual_path)) stop('No stitched actuals found')
+actual_raw <- read_csv(actual_path, show_col_types = FALSE)
+
+# Map location_name -> FIPS
+location_to_fips <- c(
+  'Alabama'='01','Alaska'='02','Arizona'='04','Arkansas'='05','California'='06','Colorado'='08','Connecticut'='09','Delaware'='10',
+  'District of Columbia'='11','Florida'='12','Georgia'='13','Hawaii'='15','Idaho'='16','Illinois'='17','Indiana'='18','Iowa'='19',
+  'Kansas'='20','Kentucky'='21','Louisiana'='22','Maine'='23','Maryland'='24','Massachusetts'='25','Michigan'='26','Minnesota'='27',
+  'Mississippi'='28','Missouri'='29','Montana'='30','Nebraska'='31','Nevada'='32','New Hampshire'='33','New Jersey'='34','New Mexico'='35',
+  'New York'='36','North Carolina'='37','North Dakota'='38','Ohio'='39','Oklahoma'='40','Oregon'='41','Pennsylvania'='42','Puerto Rico'='72',
+  'Rhode Island'='44','South Carolina'='45','South Dakota'='46','Tennessee'='47','Texas'='48','Utah'='49','Vermont'='50','Virginia'='51',
+  'Washington'='53','West Virginia'='54','Wisconsin'='55','Wyoming'='56','US'='US'
+)
+
+actual_data <- actual_raw %>%
+  transmute(location = location_to_fips[location_name], date = as.Date(date), actual_value = total_hosp) %>%
+  filter(!is.na(location), date >= EVAL_START)
+
+# Helper to load a model file
+load_model <- function(path, model_name, h){
+  if (!file.exists(path)) return(NULL)
+  df <- read_csv(path, show_col_types = FALSE)
+  df$model <- model_name
+  df$h <- h
+  df <- df %>% mutate(
+    reference_date = as.Date(reference_date),
+    target_end_date = as.Date(target_end_date)
+  )
+  df
+}
+
+all_models <- list()
+for (h in 1:4) {
+  baseline <- load_model(sprintf('forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', h), 'FluSight-baseline', h)
+  arima <- load_model(sprintf('forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv', h), 'ARIMA', h)
+  lgbm  <- load_model(sprintf('forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h%d_forecasts.csv', h), 'LGBM', h)
+  svm   <- load_model(sprintf('forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', h), 'SVM', h)
+  dfs <- list(baseline, arima, lgbm, svm)
+  dfs <- dfs[!sapply(dfs, is.null)]
+  if (length(dfs) > 0) all_models[[paste0('h', h)]] <- bind_rows(dfs)
+}
+
+if (length(all_models) == 0) stop('No retrospective forecast files found')
+retros <- bind_rows(all_models) %>% filter(as.Date(target_end_date) >= EVAL_START)
+
+# WIS function (CDC-style on log scale)
+calculate_wis_single <- function(qvals, qlevels, actual_value){
+  qlog <- log(as.numeric(qvals) + 1)
+  alog <- log(as.numeric(actual_value) + 1)
+  alphas <- unique(c(qlevels[qlevels <= 0.5], 1 - qlevels[qlevels > 0.5]))
+  alphas <- alphas[alphas > 0]
+  scores <- sapply(alphas, function(a){
+    li <- which.min(abs(qlevels - a))
+    ui <- which.min(abs(qlevels - (1 - a)))
+    L <- qlog[li]; U <- qlog[ui]
+    width <- U - L
+    pen <- if (alog < L) (2/a) * (L - alog) else if (alog > U) (2/a) * (alog - U) else 0
+    width + pen
+  })
+  mean(scores)
+}
+
+# Compute WIS per horizon
+wis_scores_all <- list()
+for (h in sort(unique(retros$h))) {
+  dfh <- retros %>% filter(h == !!h, output_type == 'quantile') %>% mutate(output_type_id = as.numeric(output_type_id))
+  if (nrow(dfh) == 0) next
+  wis_scores <- dfh %>%
+    group_by(h, model, reference_date, target_end_date, location) %>%
+    summarise(quantile_values = list(value), quantile_levels = list(output_type_id), .groups = 'drop') %>%
+    left_join(actual_data, by = c('target_end_date' = 'date', 'location' = 'location')) %>%
+    filter(!is.na(actual_value)) %>%
+    rowwise() %>%
+    mutate(interval_score = calculate_wis_single(unlist(quantile_values), unlist(quantile_levels), actual_value)) %>%
+    ungroup()
+  wis_scores_all[[paste0('h', h)]] <- wis_scores
+}
+
+wis_scores_all_df <- bind_rows(wis_scores_all) %>% filter(!(location %in% c('72','US')))
+
+# Per-horizon geometric mean WIS and relative WIS (model vs baseline)
+per_horizon_summary <- wis_scores_all_df %>%
+  group_by(h, model, location) %>%
+  summarise(mean_wis_loc = mean(interval_score, na.rm=TRUE), .groups='drop') %>%
+  group_by(h, model) %>%
+  summarise(geometric_mean_wis = exp(mean(log(mean_wis_loc), na.rm=TRUE)), .groups='drop') %>%
+  group_by(h) %>%
+  mutate(relative_wis = geometric_mean_wis / geometric_mean_wis[model == 'FluSight-baseline']) %>%
+  ungroup()
+
+cat("\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (>= 2025-07-01):\n")
+print(per_horizon_summary)
+
+# Combined across horizons (all WIS pooled)
+combined_summary <- wis_scores_all_df %>%
+  group_by(model, location) %>%
+  summarise(mean_wis_loc = mean(interval_score, na.rm=TRUE), .groups='drop') %>%
+  group_by(model) %>%
+  summarise(geometric_mean_wis = exp(mean(log(mean_wis_loc), na.rm=TRUE)), .groups='drop') %>%
+  mutate(relative_wis = geometric_mean_wis / geometric_mean_wis[model == 'FluSight-baseline'])
+
+cat("\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (All horizons, >= 2025-07-01):\n")
+print(combined_summary)
+```
