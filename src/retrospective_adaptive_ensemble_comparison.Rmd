@@ -226,7 +226,8 @@ per_horizon_summary <- wis_by_model %>%
                                geometric_mean_wis / baseline_gmw,
                                NA_real_)) %>%
   select(-baseline_gmw) %>%
-  ungroup()
+  ungroup() %>%
+  arrange(h, is.na(relative_wis), relative_wis)
 
 cat("\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (>= 2025-07-01):\n\n")
 print(knitr::kable(per_horizon_summary, digits = 4))
@@ -243,7 +244,8 @@ combined_summary <- combined_by_model %>%
   mutate(relative_wis = ifelse(!is.na(baseline_gmw) & baseline_gmw > 0,
                                geometric_mean_wis / baseline_gmw,
                                NA_real_)) %>%
-  select(-baseline_gmw)
+  select(-baseline_gmw) %>%
+  arrange(is.na(relative_wis), relative_wis)
 
 cat("\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (All horizons, >= 2025-07-01):\n\n")
 print(knitr::kable(combined_summary, digits = 4))
