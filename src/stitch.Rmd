@@ -249,87 +249,55 @@ show(p4)
 
 ## Pull fractional influenza in ED visits
 ```{r, echo = F}
-# API endpoint URL
-url <- "https://data.cdc.gov/resource/rdmq-nq56.json"
+# Efficient, full-history ED pull (aggregate only)
+ed_url <- "https://data.cdc.gov/resource/rdmq-nq56.json"
 
-# Function to retrieve data with limit and offset
-get_data <- function(limit, offset, max_retries = 5, retry_delay = 5) {
-  query <- paste0(url, "?$limit=", limit, "&$offset=", offset)
-  
-  for (attempt in 1:max_retries) {
-    tryCatch({
-      response <- GET(query)
-      
-      if (status_code(response) == 200) {
-        data <- fromJSON(content(response, "text"), flatten = TRUE)
-        return(if (length(data) == 0) NULL else data)
-      } else if (status_code(response) == 503) {
-        warning(paste("Attempt", attempt, "- Server unavailable (503). Retrying in", retry_delay, "seconds..."))
-        Sys.sleep(retry_delay)
-      } else {
-        stop("Error in API request: ", status_code(response))
-      }
-    }, error = function(e) {
-      warning(paste("Attempt", attempt, "- Error:", e$message, "Retrying in", retry_delay, "seconds..."))
-      Sys.sleep(retry_delay)
-    })
-  }
-  
-  stop("Max retries reached. Unable to retrieve data.")
-}
-
-# Function to retrieve all data
-get_all_data <- function(limit = 3300, initial_offset = 0, max_retries = 5, retry_delay = 5) {
-  offset <- initial_offset
-  all_data <- data.frame()
-  batch_count <- 0
-  
+fetch_ed_all <- function(limit = 10000, pause = 0.1) {
+  offset <- 0L
+  out <- list()
+  sel <- "week_end,geography,county,percent_visits_combined,percent_visits_influenza"
+  where <- "county='All'"
+  ord <- "geography,week_end"
   repeat {
-    cat(paste("Fetching batch:", batch_count + 1, "Offset:", offset, "\n"))
-    
-    data_batch <- get_data(limit, offset, max_retries, retry_delay)
-    
-    if (is.null(data_batch)) {
-      break
-    }
-    
-    all_data <- bind_rows(all_data, data_batch)
-    
-    batch_count <- batch_count + 1
-    cat(paste("Rows retrieved:", nrow(data_batch), "\n"))
-    
+    resp <- GET(
+      ed_url,
+      query = list(
+        "$select" = sel,
+        "$where"  = where,
+        "$order"  = ord,
+        "$limit"  = limit,
+        "$offset" = offset
+      ),
+      timeout(30)
+    )
+    stop_for_status(resp)
+    dat <- fromJSON(content(resp, "text", encoding = "UTF-8"), flatten = TRUE)
+    if (length(dat) == 0) break
+    out[[length(out) + 1L]] <- dat
+    if (nrow(dat) < limit) break
     offset <- offset + limit
-    
-    if (nrow(data_batch) < limit) {
-      break
-    }
-    
-    Sys.sleep(0.1)  # Increased delay between requests to be more considerate to the server
+    Sys.sleep(pause)
   }
-  
-  cat(paste("Total batches:", batch_count, "Total rows:", nrow(all_data), "\n"))
-  return(all_data)
+  bind_rows(out)
 }
 
-all_data <- get_all_data()
+all_data <- fetch_ed_all()
 
-print(paste("Total rows retrieved:", nrow(all_data)))
-
-# Process retrieved data
+# Build scale factor and align to weekly grid
 df.ed <- all_data %>%
-  mutate(date = as_date(week_end),
-         location_name = geography) %>%
-  mutate(location_name = ifelse(location_name == 'United States', 'US', location_name)) %>%
-  filter(date > mdy('04/27/2024') &
-           county == 'All') %>%
-  select(date, location_name, percent_visits_combined, percent_visits_covid, 
-         percent_visits_influenza, percent_visits_rsv) %>%
-  mutate(scale_factor = as.numeric(percent_visits_influenza)/as.numeric(percent_visits_combined)) %>%
+  transmute(
+    date = as_date(week_end),
+    location_name = ifelse(geography == 'United States', 'US', geography),
+    percent_visits_combined = suppressWarnings(as.numeric(percent_visits_combined)),
+    percent_visits_influenza = suppressWarnings(as.numeric(percent_visits_influenza)),
+    scale_factor = percent_visits_influenza / percent_visits_combined
+  ) %>%
   select(date, location_name, scale_factor) %>%
-  full_join(predicted.hosp %>% filter(date > mdy('04/27/2024')), by = c('date', 'location_name')) %>%
+  full_join(predicted.hosp %>% select(date, location_name), by = c('date', 'location_name')) %>%
   arrange(location_name, date) %>%
-  fill(everything(), .direction = "down") %>%
-  select(-ili, -pred_hosp)
+  group_by(location_name) %>%
+  fill(scale_factor, .direction = "down") %>%
+  ungroup()
 
 write_csv(df.ed, file = file_names$ed_output)
 ```
@@ -348,11 +316,12 @@ fetch_flu <- function() {
     dplyr::select(jurisdiction, weekendingdate, totalconfflunewadm) %>% 
     dplyr::rename("value" = "totalconfflunewadm", "date"="weekendingdate", "state"="jurisdiction") %>% 
     dplyr::mutate(date = as.Date(date), 
-                  value = as.numeric(value),
+                  value = suppressWarnings(as.numeric(value)),
                   state = str_replace(state, "USA", "US"))
   
   #bind state population data
-  full_data = dplyr::left_join(recent_data, cdc.locations.file, by = join_by("state" == "abbreviation"))
+  cdc_meta <- dplyr::select(cdc.locations.file, abbreviation, location, location_name)
+  full_data = dplyr::left_join(recent_data, cdc_meta, by = join_by("state" == "abbreviation"))
 
   # Drop rows with missing location_name, group and interpolate non-numeric/NA values in `value`
   full_data <- full_data %>%
@@ -365,7 +334,9 @@ fetch_flu <- function() {
   #calculates weekly rate 
   final_dat <- full_data %>% 
     left_join(population, by = c("location_name")) %>%
-    dplyr::mutate(weekly_rate = (value*100000)/population) %>% 
+    dplyr::mutate(value = suppressWarnings(as.numeric(value)),
+                  population = suppressWarnings(as.numeric(population)),
+                  weekly_rate = (value * 100000) / population) %>% 
     select(date, location, location_name, value, weekly_rate)
   
   return(final_dat)

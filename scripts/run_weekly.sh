@@ -119,16 +119,20 @@ for H in 1 2 3 4; do
 done
 
 echo "==> Prospective Adaptive Ensemble"
-AE_ARGS=()
+# Align ensemble as-of date with the reference date used by prospective generators
+PROSP_ASOF=$(python - <<PY
+import pandas as pd
+df=pd.read_csv('$STITCHED'); df['date']=pd.to_datetime(df['date'])
+print(df['date'].max().date().isoformat())
+PY
+)
+echo "Using prospective as-of date from stitched data: $PROSP_ASOF"
+AE_ARGS=(--asof-date "$PROSP_ASOF")
 if [[ -n "$ENSEMBLE_LOOKBACK_WEEKS" ]]; then AE_ARGS+=(--lookback-weeks "$ENSEMBLE_LOOKBACK_WEEKS"); fi
 if [[ -n "$ENSEMBLE_HISTORY_WEEKS" ]]; then AE_ARGS+=(--history-weeks "$ENSEMBLE_HISTORY_WEEKS"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_ARIMA" ]]; then AE_ARGS+=(--include-arima "$ENSEMBLE_INCLUDE_ARIMA"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_SVM" ]]; then AE_ARGS+=(--include-svm "$ENSEMBLE_INCLUDE_SVM"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM" ]]; then AE_ARGS+=(--include-lgbm "$ENSEMBLE_INCLUDE_LGBM"); fi
-if (( ${#AE_ARGS[@]} )); then
-  Rscript src/generate_prosp_adaptive_ensemble.R "${AE_ARGS[@]}"
-else
-  Rscript src/generate_prosp_adaptive_ensemble.R
-fi
+Rscript src/generate_prosp_adaptive_ensemble.R "${AE_ARGS[@]}"
 
 echo "==> Done. Outputs under forecasts/{retrospective,prospective}"
