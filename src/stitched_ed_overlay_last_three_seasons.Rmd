@@ -1,0 +1,94 @@
+---
+title: "Stitched vs ED Overlay (Last 3 Seasons)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(httr)
+library(jsonlite)
+
+start_date <- mdy('07/01/2022')
+end_date   <- start_date + years(3) - days(1)
+
+# Load latest stitched hospitalizations (final stitched time series)
+stitched_dir <- '../data/imputed_sets'
+stitched_files <- list.files(stitched_dir, pattern = '^imputed_and_stitched_hosp_\\d{4}-\\d{2}-\\d{2}\\.csv$', full.names = TRUE)
+stopifnot(length(stitched_files) > 0)
+
+get_date <- function(x, prefix) as.Date(sub(paste0('^', prefix, '_(\\d{4}-\\d{2}-\\d{2})\\.csv$'), '\\1', basename(x)))
+stitched_dates <- get_date(stitched_files, 'imputed_and_stitched_hosp')
+imputed_file <- stitched_files[which.max(stitched_dates)]
+
+df_hosp <- readr::read_csv(imputed_file, show_col_types = FALSE) %>%
+  mutate(date = as.Date(date)) %>%
+  select(date, location_name, total_hosp)
+
+# Redownload ED data (percent of ED visits for influenza)
+base_url <- 'https://data.cdc.gov/resource/rdmq-nq56.json'
+
+fetch_ed <- function(start_dt, limit = 50000) {
+  offset <- 0L
+  out <- list()
+  # Restrict to last three seasons and county=='All' to reduce volume
+  where <- paste0("county='All' AND week_end >= '", format(start_dt, '%Y-%m-%d'), "T00:00:00.000'")
+  repeat {
+    resp <- GET(base_url, query = list(
+      "$select" = "week_end,geography,county,percent_visits_influenza",
+      "$where"  = where,
+      "$limit"  = limit,
+      "$offset" = offset
+    ))
+    stopifnot(status_code(resp) == 200)
+    dat <- fromJSON(content(resp, 'text', encoding = 'UTF-8'), flatten = TRUE)
+    if (length(dat) == 0) break
+    out[[length(out) + 1L]] <- dat
+    if (nrow(dat) < limit) break
+    offset <- offset + limit
+  }
+  if (length(out) == 0) return(tibble())
+  bind_rows(out)
+}
+
+raw_ed <- fetch_ed(start_date)
+
+df_ed <- raw_ed %>%
+  transmute(
+    date = as.Date(week_end),
+    location_name = ifelse(geography == 'United States', 'US', geography),
+    ed_pct_influenza = suppressWarnings(as.numeric(percent_visits_influenza))
+  )
+
+# Prepare merged frame for plotting within the desired window
+df <- df_hosp %>%
+  left_join(df_ed, by = c('date', 'location_name')) %>%
+  filter(date >= start_date, date <= end_date)
+
+safe_rescale <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (!is.finite(rng[1]) || !is.finite(rng[2]) || rng[1] == rng[2]) return(rep(NA_real_, length(x)))
+  (x - rng[1]) / (rng[2] - rng[1])
+}
+
+plot_df <- df %>%
+  group_by(location_name) %>%
+  mutate(hosp_scaled = safe_rescale(total_hosp),
+         ed_scaled   = safe_rescale(ed_pct_influenza)) %>%
+  ungroup() %>%
+  select(date, location_name, `Hospitalizations` = hosp_scaled, `ED%` = ed_scaled) %>%
+  pivot_longer(cols = c(`Hospitalizations`, `ED%`), names_to = 'series', values_to = 'value') %>%
+  filter(!is.na(value))
+```
+
+```{r fig.align='center', fig.width=12, fig.height=22}
+ggplot(plot_df, aes(date, value, color = series)) +
+  geom_line(alpha = 0.8) +
+  scale_color_manual(values = c(`Hospitalizations` = 'black', `ED%` = '#D62728'), name = NULL) +
+  coord_cartesian(ylim = c(0, 1)) +
+  facet_wrap(~location_name, ncol = 5) +
+  theme_bw() +
+  labs(x = NULL, y = NULL)
+```

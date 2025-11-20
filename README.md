@@ -35,13 +35,15 @@ bash scripts/run_weekly.sh \
 - Stitched data: `data/imputed_sets/imputed_and_stitched_hosp_<YYYY-MM-DD>.csv`
 - Retrospective forecasts (CDC-style, quantiles only):
   - `forecasts/retrospective/arima/ARIMA_h{1..4}_forecasts.csv`
-  - `forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h{1..4}_forecasts.csv`
+  - `forecasts/retrospective/lgbm_enhanced_t100/TwoStage-FrozenMu_h{1..4}_forecasts.csv` (LGBM t100)
+  - `forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h{1..4}_forecasts.csv` (LGBM t10)
   - `forecasts/retrospective/svm_retrospective_h{1..4}.csv`
 - Prospective forecasts (CDC-style, quantiles only):
   - `forecasts/prospective/ARIMA_h{1..4}_prospective_<YYYYMMDD>.csv`
   - `forecasts/prospective/SVM_h{1..4}_prospective_<YYYYMMDD>.csv`
-  - `forecasts/prospective/TwoStage-FrozenMu_h{1..4}_prospective_<YYYYMMDD>.csv`
-  - `forecasts/prospective/AdaptiveEnsemble_h{1..4}_prospective_<YYYYMMDD>.csv`
+  - `forecasts/prospective/TwoStage-FrozenMu-t100_h{1..4}_prospective_<YYYYMMDD>.csv`
+  - `forecasts/prospective/TwoStage-FrozenMu-t10_h{1..4}_prospective_<YYYYMMDD>.csv`
+  - `forecasts/prospective/AdaptiveEnsemble_prospective_<YYYYMMDD>.csv`
 
 Schema (CDC-style):
 
@@ -55,10 +57,14 @@ reference_date, horizon, target, target_end_date, location, output_type, output_
 ## LightGBM Model Saving
 
 Prospective LightGBM training saves models (per location, per horizon) to:
+- `models/lgbm_enhanced_t100/point_mu/{location}_h{h}_booster.txt`
+- `models/lgbm_enhanced_t100/scale_sigma/{location}_h{h}_lgbmlss_model.pkl`
 - `models/lgbm_enhanced_t10/point_mu/{location}_h{h}_booster.txt`
 - `models/lgbm_enhanced_t10/scale_sigma/{location}_h{h}_lgbmlss_model.pkl`
 
-Retrospective LGBM generation can read from `--models-base-dir models/lgbm_enhanced_t10`.
+Retrospective LGBM generation reads from the corresponding model directories and writes under:
+- `forecasts/retrospective/lgbm_enhanced_t100/`
+- `forecasts/retrospective/lgbm_enhanced_t10/`
 
 ## Prospective Ensemble Controls
 

@@ -306,24 +306,36 @@ write_csv(df.ed, file = file_names$ed_output)
 ```{r}
 fetch_flu <- function() {
   
-  #read data from data.cdc.gov, filtering for when flu reporting became mandatory
-  health_data = RSocrata::read.socrata(url = "https://data.cdc.gov/resource/mpgq-jmmr.json") %>% 
-    dplyr::filter(weekendingdate >= as.Date("2024-05-01"))
+  # Read data directly from FluSight GitHub target-data (Source of Truth)
+  url <- "https://raw.githubusercontent.com/cdcepi/FluSight-forecast-hub/main/target-data/target-hospital-admissions.csv"
   
-  #remove  VI and AS as they are not included for FluSight, keep only necessary vars and add epiweek and epiyear 
-  recent_data = health_data %>% 
-    dplyr::filter(!jurisdiction %in% c("VI", "AS", "GU", "MP")) %>% 
-    dplyr::select(jurisdiction, weekendingdate, totalconfflunewadm) %>% 
-    dplyr::rename("value" = "totalconfflunewadm", "date"="weekendingdate", "state"="jurisdiction") %>% 
-    dplyr::mutate(date = as.Date(date), 
-                  value = suppressWarnings(as.numeric(value)),
-                  state = str_replace(state, "USA", "US"))
+  # Load and process
+  # The CSV has columns: date, location, location_name, value, weekly_rate
+  recent_data <- read_csv(url, show_col_types = FALSE) %>%
+    dplyr::filter(date >= as.Date("2024-05-01"))
   
-  #bind state population data
-  cdc_meta <- dplyr::select(cdc.locations.file, abbreviation, location, location_name)
-  full_data = dplyr::left_join(recent_data, cdc_meta, by = join_by("state" == "abbreviation"))
+  # Ensure location is a 2-character string (FIPS with leading zero)
+  # 'US' should remain 'US'
+  recent_data <- recent_data %>%
+    dplyr::mutate(
+      location = as.character(location),
+      location = ifelse(location == "US", "US", sprintf("%02s", location))
+    )
 
-  # Drop rows with missing location_name, group and interpolate non-numeric/NA values in `value`
+  # We need to ensure we have the full set of locations we expect.
+  # We can join with our 'cdc.locations.file' (loaded in setup) to filter/verify.
+  # The GitHub data already has 'location_name', but let's ensure consistency with our metadata.
+  
+  cdc_meta <- cdc.locations.file %>% 
+    dplyr::select(location, location_name) %>%
+    dplyr::mutate(location = as.character(location))
+  
+  full_data <- dplyr::left_join(recent_data, cdc_meta, by = c("location"), suffix = c("_raw", "")) %>%
+    dplyr::mutate(location_name = coalesce(location_name, location_name_raw)) %>%
+    dplyr::select(-location_name_raw)
+  
+  # Drop rows with missing location_name
+  # Group and interpolate non-numeric/NA values in `value`
   full_data <- full_data %>%
     dplyr::filter(!is.na(location_name)) %>%
     dplyr::arrange(location_name, date) %>%
@@ -331,7 +343,8 @@ fetch_flu <- function() {
     dplyr::mutate(value = zoo::na.approx(value, x = as.numeric(date), na.rm = FALSE)) %>%
     dplyr::ungroup()
   
-  #calculates weekly rate 
+  # Recalculate weekly rate to ensure consistency with our population data
+  # (The GitHub file has a weekly_rate column, but best to be safe with our own pop numbers)
   final_dat <- full_data %>% 
     left_join(population, by = c("location_name")) %>%
     dplyr::mutate(value = suppressWarnings(as.numeric(value)),

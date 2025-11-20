@@ -448,7 +448,7 @@ def main():
                        help='Model name for output files (default: TwoStage-FrozenMu)')
     parser.add_argument('--save-models', action='store_true',
                        help='Save trained Stage1/Stage2 models to disk')
-    parser.add_argument('--models-output-dir', type=str, default='models/lgbm_enhanced_t10',
+    parser.add_argument('--models-output-dir', type=str, default='models/lgbm_enhanced_t100',
                        help='Base directory to save models when --save-models is set')
     
     args = parser.parse_args()

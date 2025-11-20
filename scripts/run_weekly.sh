@@ -78,6 +78,7 @@ PY
 echo "Cutoff: $CUTOFF"
 
 mkdir -p forecasts/retrospective/arima
+mkdir -p forecasts/retrospective/lgbm_enhanced_t100
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10
 mkdir -p forecasts/prospective
 
@@ -85,7 +86,12 @@ echo "==> Retrospective ARIMA"
 python src/generate_retro_arima.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
   --output forecasts/retrospective/arima --max-horizon 4
 
-echo "==> Retrospective LGBM (using hyperparams in models/lgbm_enhanced_t10)"
+echo "==> Retrospective LGBM (t100; using hyperparams in models/lgbm_enhanced_t100)"
+python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
+  --models-dir models/lgbm_enhanced_t100 --models-base-dir models/lgbm_enhanced_t100 \
+  --output-base forecasts/retrospective
+
+echo "==> Retrospective LGBM (t10; using hyperparams in models/lgbm_enhanced_t10)"
 python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
   --models-dir models/lgbm_enhanced_t10 --models-base-dir models/lgbm_enhanced_t10 \
   --output-base forecasts/retrospective
@@ -106,14 +112,25 @@ python src/generate_prosp_arima.py --data-file "$STITCHED" --output forecasts/pr
 echo "==> Prospective SVM (h=1..4)"
 python src/generate_prosp_svm.py --data-file "$STITCHED" --models models/svm_t100 --output forecasts/prospective
 
-echo "==> Prospective LGBM (h=1..4; also save models under models/lgbm_enhanced_t10)"
+echo "==> Prospective LGBM (h=1..4; saving models under models/lgbm_enhanced_t100 and models/lgbm_enhanced_t10)"
 for H in 1 2 3 4; do
+  # t100 prospective
+  python src/generate_prosp_lgbm.py \
+    --hyperparams models/lgbm_enhanced_t100/two_stage_hyperparameters_h${H}.pkl \
+    --data-file "$STITCHED" \
+    --horizon ${H} \
+    --output forecasts/prospective \
+    --model-name TwoStage-FrozenMu-t100 \
+    --save-models \
+    --models-output-dir models/lgbm_enhanced_t100 || true
+
+  # t10 prospective
   python src/generate_prosp_lgbm.py \
     --hyperparams models/lgbm_enhanced_t10/two_stage_hyperparameters_h${H}.pkl \
     --data-file "$STITCHED" \
     --horizon ${H} \
     --output forecasts/prospective \
-    --model-name TwoStage-FrozenMu \
+    --model-name TwoStage-FrozenMu-t10 \
     --save-models \
     --models-output-dir models/lgbm_enhanced_t10 || true
 done

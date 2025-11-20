@@ -135,47 +135,42 @@ class BatchRetrospectiveForecastGenerator:
         
         configurations = []
         
-        # Find subdirectories (if present)
-        model_folders = [d for d in os.listdir(models_dir) if os.path.isdir(os.path.join(models_dir, d))]
+        # Always search for hyperparameters at the root of models_dir
+        root_folder_name = os.path.basename(models_dir.rstrip('/'))
+        root_hyperparams = glob.glob(os.path.join(models_dir, "two_stage_hyperparameters_h*.pkl"))
+        for hyperparam_file in sorted(root_hyperparams):
+            filename = os.path.basename(hyperparam_file)
+            if 'parameters_h' not in filename:
+                print(f"  Warning: Could not find 'parameters_h' pattern in {filename}, skipping")
+                continue
+            horizon_str = filename.split('parameters_h')[1].split('.pkl')[0]
+            try:
+                horizon = int(horizon_str)
+            except ValueError:
+                print(f"  Warning: Could not parse horizon from {filename}, skipping")
+                continue
+            configurations.append({
+                'folder_name': root_folder_name,
+                'hyperparam_file': hyperparam_file,
+                'horizon': horizon
+            })
+            print(f"  Found: {root_folder_name}/h{horizon}")
 
-        if model_folders:
-            for folder_name in sorted(model_folders):
-                folder_path = os.path.join(models_dir, folder_name)
-                # Find all hyperparameter files in this folder
-                hyperparam_files = glob.glob(os.path.join(folder_path, "two_stage_hyperparameters_h*.pkl"))
-                for hyperparam_file in sorted(hyperparam_files):
-                    filename = os.path.basename(hyperparam_file)
-                    if 'parameters_h' in filename:
-                        horizon_str = filename.split('parameters_h')[1].split('.pkl')[0]
-                        try:
-                            horizon = int(horizon_str)
-                        except ValueError:
-                            print(f"  Warning: Could not parse horizon from {filename}, skipping")
-                            continue
-                    else:
-                        print(f"  Warning: Could not find 'parameters_h' pattern in {filename}, skipping")
-                        continue
-                    configurations.append({
-                        'folder_name': folder_name,
-                        'hyperparam_file': hyperparam_file,
-                        'horizon': horizon
-                    })
-                    print(f"  Found: {folder_name}/h{horizon}")
-        else:
-            # No subfolders: treat models_dir itself as the folder
-            folder_name = os.path.basename(models_dir.rstrip('/'))
-            hyperparam_files = glob.glob(os.path.join(models_dir, "two_stage_hyperparameters_h*.pkl"))
+        # Also search immediate subdirectories for hyperparameters (if any)
+        model_folders = [d for d in os.listdir(models_dir) if os.path.isdir(os.path.join(models_dir, d))]
+        for folder_name in sorted(model_folders):
+            folder_path = os.path.join(models_dir, folder_name)
+            hyperparam_files = glob.glob(os.path.join(folder_path, "two_stage_hyperparameters_h*.pkl"))
             for hyperparam_file in sorted(hyperparam_files):
                 filename = os.path.basename(hyperparam_file)
-                if 'parameters_h' in filename:
-                    horizon_str = filename.split('parameters_h')[1].split('.pkl')[0]
-                    try:
-                        horizon = int(horizon_str)
-                    except ValueError:
-                        print(f"  Warning: Could not parse horizon from {filename}, skipping")
-                        continue
-                else:
+                if 'parameters_h' not in filename:
                     print(f"  Warning: Could not find 'parameters_h' pattern in {filename}, skipping")
+                    continue
+                horizon_str = filename.split('parameters_h')[1].split('.pkl')[0]
+                try:
+                    horizon = int(horizon_str)
+                except ValueError:
+                    print(f"  Warning: Could not parse horizon from {filename}, skipping")
                     continue
                 configurations.append({
                     'folder_name': folder_name,

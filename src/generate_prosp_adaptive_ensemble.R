@@ -30,19 +30,6 @@ while (i <= length(args)) {
   i <- i + 1
 }
 
-# Compute last Saturday as-of-date (or override)
-if (!is.na(AS_OF_OVERRIDE)) {
-  as_of_date <- as.Date(AS_OF_OVERRIDE)
-} else {
-  # Ensure we use the most recent Saturday (same-day if Saturday)
-  today <- Sys.Date()
-  as_of_date <- today - ((lubridate::wday(today) - 7) %% 7)
-}
-as_of_str  <- format(as_of_date, "%Y-%m-%d")
-as_of_ts   <- format(as_of_date, "%Y%m%d")
-
-message(sprintf("Prospective adaptive ensemble for as_of=%s", as_of_str))
-
 # Helper: latest stitched file
 latest_stitched <- function() {
   files <- list.files("data/imputed_sets", pattern = "imputed_and_stitched_hosp_\\d{4}-\\d{2}-\\d{2}\\.csv", full.names = TRUE)
@@ -57,8 +44,46 @@ actual_data <- actual_raw %>% select(location_name, date, total_hosp) %>%
   mutate(date = as.Date(date)) %>%
   filter(!is.na(actual_value))
 
+# Compute as-of-date: prefer override; else align with latest data date (default)
+
+if (!is.na(AS_OF_OVERRIDE)) {
+
+  as_of_date <- as.Date(AS_OF_OVERRIDE)
+
+} else {
+
+  as_of_date <- max(actual_data$date)
+
+}
+
+as_of_str  <- format(as_of_date, "%Y-%m-%d")
+
+as_of_ts   <- format(as_of_date, "%Y%m%d")
+
+
+
+# FluSight 2025-26: Reference Date is Saturday *after* the forecast due date.
+
+# Our as_of_date is the Saturday *before* the due date (last available data).
+
+submission_ref_date <- as_of_date + 7
+
+submission_ref_ts   <- format(submission_ref_date, "%Y%m%d")
+
+
+
+message(sprintf("Prospective adaptive ensemble for as_of=%s (Submission Ref Date=%s)", as_of_str, format(submission_ref_date, "%Y-%m-%d")))
+
+
+
 # Map to FIPS
+
+
+
 location_to_fips <- c(
+
+
+
   'Alabama' = '01', 'Alaska' = '02', 'Arizona' = '04', 'Arkansas' = '05',
   'California' = '06', 'Colorado' = '08', 'Connecticut' = '09', 'Delaware' = '10',
   'District of Columbia' = '11', 'Florida' = '12', 'Georgia' = '13', 'Hawaii' = '15',
@@ -82,20 +107,35 @@ CDC_QUANTILES <- c(0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45
 
 # WIS function (log scale for CDC methodology)
 calculate_wis_single <- function(quantile_values, quantile_levels, actual_value) {
-  qlog <- log(as.numeric(quantile_values) + 1)
-  alog <- log(as.numeric(actual_value) + 1)
-  alphas <- unique(c(quantile_levels[quantile_levels <= 0.5], 1 - quantile_levels[quantile_levels > 0.5]))
-  alphas <- alphas[alphas > 0]
+  # Validate actual_value
+  if (length(actual_value) == 0 || all(is.na(actual_value))) return(NA_real_)
+  qv <- as.numeric(quantile_values)
+  ql <- as.numeric(quantile_levels)
+  aval <- as.numeric(actual_value)[1]
+  alog <- log(aval + 1)
+  if (!is.finite(alog)) return(NA_real_)
+  # Keep finite pairs only
+  keep <- is.finite(qv) & is.finite(ql)
+  qv <- qv[keep]; ql <- ql[keep]
+  if (length(qv) == 0 || length(ql) == 0) return(NA_real_)
+  # Define alpha pairs from available quantiles
+  alphas <- unique(c(ql[ql <= 0.5], 1 - ql[ql > 0.5]))
+  alphas <- alphas[is.finite(alphas) & alphas > 0]
+  if (length(alphas) == 0) return(NA_real_)
+  qlog <- log(pmax(qv, 0) + 1)
   scores <- c()
   for (a in alphas) {
-    li <- which.min(abs(quantile_levels - a))
-    ui <- which.min(abs(quantile_levels - (1 - a)))
+    li <- suppressWarnings(which.min(abs(ql - a)))
+    ui <- suppressWarnings(which.min(abs(ql - (1 - a))))
+    if (length(li) == 0 || length(ui) == 0 || is.na(li) || is.na(ui)) { scores <- c(scores, NA_real_); next }
     L <- qlog[li]; U <- qlog[ui]
+    if (!is.finite(L) || !is.finite(U)) { scores <- c(scores, NA_real_); next }
     width <- U - L
-    pen <- if (alog < L) (2/a) * (L - alog) else if (alog > U) (2/a) * (alog - U) else 0
-    scores <- c(scores, width + pen)
+    pen <- if (is.finite(alog) && alog < L) (2/a) * (L - alog) else if (is.finite(alog) && alog > U) (2/a) * (alog - U) else 0
+    score <- if (is.finite(width) && is.finite(pen)) width + pen else NA_real_
+    scores <- c(scores, score)
   }
-  mean(scores)
+  if (all(is.na(scores))) NA_real_ else mean(scores, na.rm = TRUE)
 }
 
 # Compute weights for a horizon based on last 4 reference weeks (using up to 8 available)
@@ -127,6 +167,10 @@ compute_weights <- function(model_dfs, horizon, as_of_date, lookback_weeks = 4, 
   if (!any(valid)) {
     w <- rep(1/length(model_dfs), length(model_dfs)); names(w) <- names(model_dfs); return(w)
   }
+  # Guard: if none valid, fall back to equal weights
+  if (!any(valid)) {
+    return(setNames(rep(1/length(model_dfs), length(model_dfs)), names(model_dfs)))
+  }
   inv <- 1 / unlist(scores[valid])
   weights <- inv / sum(inv)
   out <- rep(0, length(model_dfs)); names(out) <- names(model_dfs)
@@ -138,14 +182,18 @@ compute_weights <- function(model_dfs, horizon, as_of_date, lookback_weeks = 4, 
 load_retro_for_h <- function(h) {
   lst <- list()
   arima_path <- file.path('forecasts/retrospective/arima', sprintf('ARIMA_h%d_forecasts.csv', h))
-  lgbm_path  <- file.path('forecasts/retrospective/lgbm_enhanced_t10', sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
+  lgbm_t100_path <- file.path('forecasts/retrospective/lgbm_enhanced_t100', sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
+  lgbm_t10_path  <- file.path('forecasts/retrospective/lgbm_enhanced_t10',  sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
   svm_glob   <- list.files('forecasts/retrospective/svm_t100', pattern = sprintf('^svm.*_h%d.*\\.csv$', h), full.names = TRUE, ignore.case = TRUE)
 
   if (INCLUDE_ARIMA && file.exists(arima_path)) {
     lst$ARIMA <- read_csv(arima_path, show_col_types = FALSE)
   }
-  if (INCLUDE_LGBM && file.exists(lgbm_path)) {
-    lst$LGBM <- read_csv(lgbm_path, show_col_types = FALSE)
+  if (INCLUDE_LGBM && file.exists(lgbm_t100_path)) {
+    lst$LGBM_t100 <- read_csv(lgbm_t100_path, show_col_types = FALSE)
+  }
+  if (INCLUDE_LGBM && file.exists(lgbm_t10_path)) {
+    lst$LGBM_t10 <- read_csv(lgbm_t10_path, show_col_types = FALSE)
   }
   if (INCLUDE_SVM && length(svm_glob) > 0) {
     # prefer a single main SVM file; otherwise combine
@@ -162,16 +210,19 @@ load_retro_for_h <- function(h) {
 load_prosp_for_h <- function(h, ts) {
   lst <- list()
   pdir <- 'forecasts/prospective'
-  files <- c(
-    file.path(pdir, sprintf('ARIMA_h%d_prospective_%s.csv', h, ts)),
-    file.path(pdir, sprintf('SVM_h%d_prospective_%s.csv', h, ts)),
-    file.path(pdir, sprintf('TwoStage-FrozenMu_h%d_prospective_%s.csv', h, ts))
-  )
-  for (fp in files) {
-    if (file.exists(fp)) {
-      key <- if (grepl('ARIMA', fp)) 'ARIMA' else if (grepl('SVM', fp)) 'SVM' else 'LGBM'
-      lst[[key]] <- read_csv(fp, show_col_types = FALSE)
-    }
+  # ARIMA and SVM (single files)
+  arima_fp <- file.path(pdir, sprintf('ARIMA_h%d_prospective_%s.csv', h, ts))
+  svm_fp   <- file.path(pdir, sprintf('SVM_h%d_prospective_%s.csv', h, ts))
+  if (file.exists(arima_fp)) lst$ARIMA <- read_csv(arima_fp, show_col_types = FALSE)
+  if (file.exists(svm_fp))   lst$SVM   <- read_csv(svm_fp, show_col_types = FALSE)
+
+  # LGBM variants: TwoStage-FrozenMu*, distinguish t100 vs t10 by filename
+  lgbm_files <- list.files(pdir, pattern = sprintf('^TwoStage-FrozenMu.*_h%d_prospective_%s\\.csv$', h, ts), full.names = TRUE)
+  for (fp in lgbm_files) {
+    key <- if (grepl('t100', basename(fp), ignore.case = TRUE)) 'LGBM_t100'
+           else if (grepl('t10', basename(fp), ignore.case = TRUE)) 'LGBM_t10'
+           else 'LGBM'
+    lst[[key]] <- read_csv(fp, show_col_types = FALSE)
   }
   lst
 }
@@ -229,7 +280,7 @@ for (h in 1:4) {
         }
         if (wtot > 0) wsum / wtot else mean(vs, na.rm = TRUE)
       }, .groups = 'drop') %>%
-    mutate(horizon = h - 1, target = 'wk inc flu hosp') %>%
+    mutate(horizon = h - 1, target = 'wk inc flu hosp', reference_date = submission_ref_date) %>%
     select(reference_date, horizon, target, target_end_date, location, output_type, output_type_id, value)
 
   all_ensembles[[paste0('h', h)]] <- ensemble
@@ -239,8 +290,8 @@ for (h in 1:4) {
 if (length(all_ensembles) > 0) {
   final_df <- bind_rows(all_ensembles)
   # Ensure proper column order
-  final_df <- final_df %>% select(reference_date, horizon, target, target_end_date, location, output_type, output_type_id, value)
-  out_path <- file.path('forecasts/prospective', sprintf('AdaptiveEnsemble_prospective_%s.csv', as_of_ts))
+  final_df <- final_df %>% select(reference_date, target, horizon, target_end_date, location, output_type, output_type_id, value)
+  out_path <- file.path('forecasts/prospective', sprintf('AdaptiveEnsemble_prospective_%s.csv', submission_ref_ts))
   write_csv(final_df, out_path)
   message(sprintf('Saved final ensemble: %s (%d rows across %d horizons)', out_path, nrow(final_df), length(all_ensembles)))
 } else {

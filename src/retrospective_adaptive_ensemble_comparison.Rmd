@@ -78,14 +78,13 @@ load_model <- function(path, model_name, h){
 
 all_models <- list()
 for (h in 1:4) {
-  baseline_path_top <- sprintf('../forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', h)
-  baseline_path_alt <- sprintf('../forecasts/retrospective/lgbm_enhanced_t10/Flusight-baseline_h%d_forecasts.csv', h)
-  baseline_path <- if (file.exists(baseline_path_top)) baseline_path_top else baseline_path_alt
+  baseline_path <- sprintf('../forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', h)
   baseline <- load_model(baseline_path, 'FluSight-baseline', h)
   arima <- load_model(sprintf('../forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv', h), 'ARIMA', h)
-  lgbm  <- load_model(sprintf('../forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h%d_forecasts.csv', h), 'LGBM', h)
+  lgbm_t100  <- load_model(sprintf('../forecasts/retrospective/lgbm_enhanced_t100/TwoStage-FrozenMu_h%d_forecasts.csv', h), 'LGBM_t100', h)
+  lgbm_t10   <- load_model(sprintf('../forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h%d_forecasts.csv', h),  'LGBM_t10', h)
   svm   <- load_model(sprintf('../forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', h), 'SVM', h)
-  dfs <- list(baseline, arima, lgbm, svm)
+  dfs <- list(baseline, arima, lgbm_t100, lgbm_t10, svm)
   dfs <- dfs[!sapply(dfs, is.null)]
   if (length(dfs) > 0) all_models[[paste0('h', h)]] <- bind_rows(dfs)
 }
@@ -95,27 +94,38 @@ ret_all <- bind_rows(all_models)
 
 # WIS function (log scale) used for weighting and evaluation
 calculate_wis_single <- function(qvals, qlevels, actual_value){
-  qlog <- log(as.numeric(qvals) + 1)
+  qv <- as.numeric(qvals)
+  ql <- as.numeric(qlevels)
   alog <- log(as.numeric(actual_value) + 1)
-  alphas <- unique(c(qlevels[qlevels <= 0.5], 1 - qlevels[qlevels > 0.5]))
-  alphas <- alphas[alphas > 0]
-  mean(sapply(alphas, function(a){
-    li <- which.min(abs(qlevels - a)); ui <- which.min(abs(qlevels - (1 - a)))
+  if (!is.finite(alog)) return(NA_real_)
+  keep <- is.finite(qv) & is.finite(ql)
+  qv <- qv[keep]; ql <- ql[keep]
+  if (length(qv) == 0 || length(ql) == 0) return(NA_real_)
+  alphas <- unique(c(ql[ql <= 0.5], 1 - ql[ql > 0.5]))
+  alphas <- alphas[is.finite(alphas) & alphas > 0]
+  if (length(alphas) == 0) return(NA_real_)
+  qlog <- log(pmax(qv, 0) + 1)
+  scores <- sapply(alphas, function(a){
+    li <- suppressWarnings(which.min(abs(ql - a)))
+    ui <- suppressWarnings(which.min(abs(ql - (1 - a))))
+    if (length(li) == 0 || length(ui) == 0 || is.na(li) || is.na(ui)) return(NA_real_)
     L <- qlog[li]; U <- qlog[ui]
+    if (!is.finite(L) || !is.finite(U)) return(NA_real_)
     width <- U - L
-    pen <- if (alog < L) (2/a) * (L - alog) else if (alog > U) (2/a) * (alog - U) else 0
-    width + pen
-  }))
+    pen <- if (is.finite(alog) && alog < L) (2/a) * (L - alog) else if (is.finite(alog) && alog > U) (2/a) * (alog - U) else 0
+    if (is.finite(width) && is.finite(pen)) width + pen else NA_real_
+  })
+  if (all(is.na(scores))) NA_real_ else mean(scores, na.rm = TRUE)
 }
 
-# Build retrospective AdaptiveEnsemble from ARIMA/LGBM/SVM using prior 4 weeks per horizon
+# Build retrospective AdaptiveEnsemble from ARIMA/LGBM_t100/LGBM_t10/SVM using prior 4 weeks per horizon
 build_weights <- function(df_h, ref_date, lookback_weeks = 4) {
   # df_h: rows for a single horizon with columns: model, reference_date, target_end_date, location, output_type, output_type_id, value
-  # Use only ARIMA/LGBM/SVM
-  cand <- df_h %>% filter(model %in% c('ARIMA','LGBM','SVM'), output_type=='quantile')
+  # Use only ARIMA/LGBM_t100/LGBM_t10/SVM
+  cand <- df_h %>% filter(model %in% c('ARIMA','LGBM_t100','LGBM_t10','SVM'), output_type=='quantile')
   prev_refs <- sort(unique(cand$reference_date))
   prev_refs <- prev_refs[prev_refs < ref_date]
-  if (length(prev_refs) == 0) return(setNames(rep(1/3, 3), c('ARIMA','LGBM','SVM')))
+  if (length(prev_refs) == 0) return(setNames(rep(1/4, 4), c('ARIMA','LGBM_t100','LGBM_t10','SVM')))
   eval_refs <- tail(prev_refs, lookback_weeks)
   # Compute WIS per model over eval_refs
   wis_by_model <- cand %>%
@@ -131,21 +141,21 @@ build_weights <- function(df_h, ref_date, lookback_weeks = 4) {
     ungroup() %>%
     group_by(model) %>%
     summarise(mean_wis = mean(wis, na.rm=TRUE), .groups='drop')
-  models <- intersect(c('ARIMA','LGBM','SVM'), wis_by_model$model)
+  models <- intersect(c('ARIMA','LGBM_t100','LGBM_t10','SVM'), wis_by_model$model)
   if (length(models) == 0 || any(!is.finite(wis_by_model$mean_wis))) {
-    return(setNames(rep(1/3, 3), c('ARIMA','LGBM','SVM')))
+    return(setNames(rep(1/4, 4), c('ARIMA','LGBM_t100','LGBM_t10','SVM')))
   }
   inv <- 1 / wis_by_model$mean_wis
   w <- inv / sum(inv)
-  out <- setNames(rep(0, 3), c('ARIMA','LGBM','SVM'))
+  out <- setNames(rep(0, 4), c('ARIMA','LGBM_t100','LGBM_t10','SVM'))
   out[wis_by_model$model] <- w
   out
 }
 
 build_ensemble_for_h <- function(ret_h) {
   # ret_h: rows for a single horizon across all models (including baseline)
-  # We will produce model == 'AdaptiveEnsemble' rows using ARIMA/LGBM/SVM only
-  cand <- ret_h %>% filter(model %in% c('ARIMA','LGBM','SVM'), output_type=='quantile')
+  # We will produce model == 'AdaptiveEnsemble' rows using ARIMA/LGBM_t100/LGBM_t10/SVM only
+  cand <- ret_h %>% filter(model %in% c('ARIMA','LGBM_t100','LGBM_t10','SVM'), output_type=='quantile')
   if (nrow(cand) == 0) return(NULL)
   ref_dates <- sort(unique(cand$reference_date))
   ens_list <- list()
@@ -154,7 +164,7 @@ build_ensemble_for_h <- function(ret_h) {
     # Combine forecasts at this ref date across models using weights
     comb <- cand %>%
       filter(reference_date == rd) %>%
-      mutate(w = case_when(model=='ARIMA' ~ w['ARIMA'], model=='LGBM' ~ w['LGBM'], model=='SVM' ~ w['SVM'], TRUE ~ 0)) %>%
+      mutate(w = case_when(model=='ARIMA' ~ w['ARIMA'], model=='LGBM_t100' ~ w['LGBM_t100'], model=='LGBM_t10' ~ w['LGBM_t10'], model=='SVM' ~ w['SVM'], TRUE ~ 0)) %>%
       group_by(reference_date, target_end_date, location, output_type_id) %>%
       summarise(value = ifelse(sum(w, na.rm=TRUE) > 0, sum(value * w, na.rm=TRUE) / sum(w, na.rm=TRUE), mean(value, na.rm=TRUE)), .groups='drop') %>%
       mutate(output_type = 'quantile', model = 'AdaptiveEnsemble')
