@@ -11,7 +11,7 @@
 
 <meta name="author" content="Pipeline Evaluation" />
 
-<meta name="date" content="2025-11-20" />
+<meta name="date" content="2025-11-26" />
 
 <title>Retrospective WIS Evaluation (Pipeline Outputs)</title>
 
@@ -461,15 +461,15 @@ Outputs)</h1>
 <h3 class="subtitle">Per-horizon and combined WIS and relative WIS since
 2025-07-01</h3>
 <h4 class="author">Pipeline Evaluation</h4>
-<h4 class="date">2025-11-20</h4>
+<h4 class="date">2025-11-26</h4>
 
 </div>
 
 
-<p>Generated on: 2025-11-20 07:59:02.896065</p>
+<p>Generated on: 2025-11-26 15:16:45.634041</p>
 <div id="retrospective-wis-evaluation-pipeline-outputs" class="section level1">
 <h1>Retrospective WIS Evaluation (Pipeline Outputs)</h1>
-<pre class="r"><code>EVAL_START &lt;- as.Date(&#39;2025-07-01&#39;)
+<pre class="r"><code>EVAL_START &lt;- as.Date(&#39;2025-10-01&#39;)
 
 # Helper: latest file in a directory by pattern
 latest_file &lt;- function(dir, pattern) {
@@ -682,30 +682,30 @@ cat(&quot;\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (&gt;= 2025-07-01):\
 ## 
 ## |  h|model             | geometric_mean_wis| relative_wis|
 ## |--:|:-----------------|------------------:|------------:|
-## |  1|SVM               |             2.4258|       0.5970|
-## |  1|AdaptiveEnsemble  |             2.5693|       0.6323|
-## |  1|ARIMA             |             2.9807|       0.7335|
-## |  1|LGBM_t100         |             3.1307|       0.7704|
-## |  1|LGBM_t10          |             3.1578|       0.7771|
-## |  1|FluSight-baseline |             4.0636|       1.0000|
-## |  2|SVM               |             2.5446|       0.6223|
-## |  2|AdaptiveEnsemble  |             2.7605|       0.6750|
-## |  2|LGBM_t10          |             3.2266|       0.7890|
-## |  2|LGBM_t100         |             3.3237|       0.8128|
-## |  2|ARIMA             |             3.3277|       0.8137|
-## |  2|FluSight-baseline |             4.0893|       1.0000|
-## |  3|SVM               |             2.9146|       0.7107|
-## |  3|AdaptiveEnsemble  |             2.9353|       0.7158|
-## |  3|LGBM_t10          |             3.2773|       0.7992|
-## |  3|LGBM_t100         |             3.4886|       0.8507|
-## |  3|ARIMA             |             3.6087|       0.8800|
-## |  3|FluSight-baseline |             4.1009|       1.0000|
-## |  4|SVM               |             2.9514|       0.7151|
-## |  4|AdaptiveEnsemble  |             3.1164|       0.7551|
-## |  4|LGBM_t10          |             3.4896|       0.8455|
-## |  4|LGBM_t100         |             3.4988|       0.8478|
-## |  4|ARIMA             |             3.8021|       0.9213|
-## |  4|FluSight-baseline |             4.1270|       1.0000|</code></pre>
+## |  1|SVM               |             2.4920|       0.6116|
+## |  1|AdaptiveEnsemble  |             2.5922|       0.6362|
+## |  1|LGBM_t100         |             3.1100|       0.7633|
+## |  1|LGBM_t10          |             3.1478|       0.7726|
+## |  1|ARIMA             |             3.1874|       0.7823|
+## |  1|FluSight-baseline |             4.0743|       1.0000|
+## |  2|SVM               |             2.8218|       0.6827|
+## |  2|AdaptiveEnsemble  |             2.8400|       0.6871|
+## |  2|LGBM_t10          |             3.3574|       0.8123|
+## |  2|LGBM_t100         |             3.5050|       0.8480|
+## |  2|ARIMA             |             3.5757|       0.8651|
+## |  2|FluSight-baseline |             4.1333|       1.0000|
+## |  3|AdaptiveEnsemble  |             3.0461|       0.7308|
+## |  3|SVM               |             3.1888|       0.7651|
+## |  3|LGBM_t10          |             3.5560|       0.8532|
+## |  3|LGBM_t100         |             3.6194|       0.8684|
+## |  3|ARIMA             |             3.8072|       0.9134|
+## |  3|FluSight-baseline |             4.1680|       1.0000|
+## |  4|SVM               |             3.1887|       0.7560|
+## |  4|AdaptiveEnsemble  |             3.2435|       0.7690|
+## |  4|LGBM_t10          |             3.6927|       0.8756|
+## |  4|LGBM_t100         |             3.9353|       0.9331|
+## |  4|ARIMA             |             3.9979|       0.9479|
+## |  4|FluSight-baseline |             4.2176|       1.0000|</code></pre>
 <pre class="r"><code># Combined across horizons
 combined_by_model &lt;- wis_scores_common %&gt;%
   group_by(model, location) %&gt;%
@@ -729,12 +729,12 @@ cat(&quot;\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (All horizons, &gt;= 20
 ## 
 ## |model             | geometric_mean_wis| relative_wis|
 ## |:-----------------|------------------:|------------:|
-## |SVM               |             2.7635|       0.6754|
-## |AdaptiveEnsemble  |             2.8286|       0.6913|
-## |LGBM_t10          |             3.2865|       0.8032|
-## |ARIMA             |             3.3898|       0.8285|
-## |LGBM_t100         |             3.4116|       0.8338|
-## |FluSight-baseline |             4.0916|       1.0000|</code></pre>
+## |AdaptiveEnsemble  |             2.9114|       0.7032|
+## |SVM               |             2.9867|       0.7214|
+## |LGBM_t10          |             3.4353|       0.8298|
+## |ARIMA             |             3.6058|       0.8709|
+## |LGBM_t100         |             3.6311|       0.8771|
+## |FluSight-baseline |             4.1400|       1.0000|</code></pre>
 </div>
 
 
