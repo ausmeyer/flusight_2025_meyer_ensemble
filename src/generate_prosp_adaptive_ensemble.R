@@ -138,41 +138,181 @@ calculate_wis_single <- function(quantile_values, quantile_levels, actual_value)
   if (all(is.na(scores))) NA_real_ else mean(scores, na.rm = TRUE)
 }
 
-# Compute weights for a horizon based on last 4 reference weeks (using up to 8 available)
+# HELPER: Linear Pooling (Mixture Distribution)
+# Inverts the mixture CDF to return values for specific target quantiles
+calculate_linear_pool <- function(df_subset, weights, target_taus) {
+  # df_subset: must contain columns 'value', 'output_type_id', 'source_model'
+  
+  # 1. Define the support (grid) for the mixture distribution
+  # We take the full range of all model predictions and add a small buffer
+  all_vals <- df_subset$value
+  if(length(all_vals) == 0) return(rep(NA, length(target_taus)))
+  
+  min_v <- min(all_vals, na.rm=TRUE)
+  max_v <- max(all_vals, na.rm=TRUE)
+  
+  # Check for non-finite bounds (e.g. if all NAs)
+  if(!is.finite(min_v) || !is.finite(max_v)) return(rep(NA, length(target_taus)))
+  
+  # If single point, return it
+  if(min_v == max_v) return(rep(min_v, length(target_taus)))
+  
+  # Buffer to avoid boundary issues
+  range_width <- max_v - min_v
+  grid_min <- max(0, min_v - (range_width * 0.1)) # Bound at 0
+  grid_max <- max_v + (range_width * 0.1)
+  
+  # Create a fine grid of hospitalizations (y-axis of CDF)
+  # 1000 points is usually sufficient for smooth resolution
+  y_grid <- seq(grid_min, grid_max, length.out = 1000)
+  
+  # 2. Build the Ensemble CDF
+  ensemble_cdf <- rep(0, length(y_grid))
+  total_weight <- 0
+  
+  models <- unique(df_subset$source_model)
+  
+  for(m in models) {
+    w <- weights[m]
+    if(is.na(w) || w <= 0) next
+    
+    # Extract this model's quantiles
+    m_data <- df_subset %>% 
+      filter(source_model == m) %>%
+      arrange(output_type_id)
+    
+    if(nrow(m_data) < 2) next # Need at least 2 points to interpolate
+    
+    # Create CDF approximation for this model: P(Y <= y)
+    # We map Values (x) -> Quantiles (y)
+    # rule=2 means: for values < min, return 0; for values > max, return 1
+    # suppressWarnings() is used because approx warns when collapsing ties, which is expected here.
+    model_cdf_probs <- suppressWarnings(approx(
+      x = m_data$value, 
+      y = m_data$output_type_id, 
+      xout = y_grid, 
+      yleft = 0, 
+      yright = 1, 
+      ties = mean
+    )$y)
+    
+    ensemble_cdf <- ensemble_cdf + (model_cdf_probs * w)
+    total_weight <- total_weight + w
+  }
+  
+  if(total_weight == 0) return(rep(NA, length(target_taus)))
+  
+  # Normalize (in case weights didn't sum to exactly 1)
+  ensemble_cdf <- ensemble_cdf / total_weight
+  
+  # 3. Invert the Ensemble CDF to get Quantiles
+  # We map Probabilities (x) -> Values (y)
+  # suppressWarnings() because ensemble_cdf may have flat regions (ties), causing benign warnings.
+  final_values <- suppressWarnings(approx(
+    x = ensemble_cdf, 
+    y = y_grid, 
+    xout = target_taus, 
+    rule = 2 # Extrapolate (clamp) if target tau is outside grid range
+  )$y)
+  
+  # Enforce zero bound on final values
+  final_values <- pmax(0, final_values)
+  
+  return(final_values)
+}
+
+# REPLACEMENT FUNCTION: compute_weights (EWMA Version)
 compute_weights <- function(model_dfs, horizon, as_of_date, lookback_weeks = 4, history_weeks = 8) {
-  # Find candidate reference_dates across models
+  
+  # 1. Identify all available reference dates from the history files
   all_refs <- unique(do.call(c, lapply(model_dfs, function(x) unique(as.Date(x$reference_date)))))
   all_refs <- sort(all_refs)
-  # restrict to references strictly before as_of_date
+  
+  # Restrict to references strictly before as_of_date
   all_refs <- all_refs[all_refs < as_of_date]
-  if (length(all_refs) == 0) return(rep(1/length(model_dfs), length(model_dfs)))
-  last_refs <- tail(all_refs, history_weeks)
-  eval_refs <- tail(last_refs, lookback_weeks)
+  
+  # We use the 'history_weeks' to define the maximum window of data we consider
+  eval_refs <- tail(all_refs, history_weeks)
+  
+  if (length(eval_refs) == 0) {
+    return(setNames(rep(1/length(model_dfs), length(model_dfs)), names(model_dfs)))
+  }
+
+  # 2. Calculate EWMA Decay Weights for these dates
+  # We interpret 'lookback_weeks' as the "Span" for the EWMA.
+  # Formula: alpha = 2 / (span + 1)
+  alpha <- 2 / (lookback_weeks + 1)
+  
+  # Assign weights to dates based on recency.
+  # eval_refs is sorted Oldest -> Newest.
+  # We want Newest to have weight ~ 1 (lag=0) and Oldest to have weight ~ (1-alpha)^lag
+  n_dates <- length(eval_refs)
+  lags <- seq(n_dates - 1, 0) # e.g. 7, 6, 5, ..., 0
+  
+  # Raw geometric decay weights
+  date_decay_weights <- (1 - alpha) ^ lags
+  
+  # Map dates to their weights for easy lookup
+  # Structure: date_weight_map['2025-01-01'] = 0.45
+  date_weight_map <- setNames(date_decay_weights, as.character(eval_refs))
 
   scores <- list()
+  
   for (mn in names(model_dfs)) {
+    # Filter model data to the evaluation window
     dfm <- model_dfs[[mn]] %>%
       filter(as.Date(reference_date) %in% eval_refs, output_type == 'quantile') %>%
       mutate(output_type_id = as.numeric(output_type_id), value = as.numeric(value))
+    
     if (nrow(dfm) == 0) { scores[[mn]] <- NA; next }
-    wis_df <- dfm %>% group_by(reference_date, target_end_date, location) %>%
+    
+    # Calculate WIS for each specific date (grouping by reference_date)
+    wis_by_date <- dfm %>% 
+      group_by(reference_date, target_end_date, location) %>%
       summarise(quantile_values = list(value), quantile_levels = list(output_type_id), .groups = 'drop') %>%
       left_join(actual_data %>% select(date, location, actual_value), by = c('target_end_date' = 'date', 'location')) %>%
       filter(!is.na(actual_value)) %>%
-      rowwise() %>% mutate(wis = calculate_wis_single(unlist(quantile_values), unlist(quantile_levels), actual_value)) %>%
-      ungroup()
-    scores[[mn]] <- if (nrow(wis_df) > 0) mean(wis_df$wis, na.rm = TRUE) else NA
+      rowwise() %>% 
+      mutate(wis = calculate_wis_single(unlist(quantile_values), unlist(quantile_levels), actual_value)) %>%
+      group_by(reference_date) %>%
+      summarise(daily_avg_wis = mean(wis, na.rm = TRUE), .groups = 'drop')
+    
+    if (nrow(wis_by_date) == 0) { scores[[mn]] <- NA; next }
+    
+    # 3. Apply the Time-Decay Weights
+    # We must match the model's available dates to our master weight map.
+    # If a model missed a week, we re-normalize the weights for the weeks it DID submit.
+    
+    model_dates_chr <- as.character(wis_by_date$reference_date)
+    w_subset <- date_weight_map[model_dates_chr]
+    
+    # Safety check for missing lookups (shouldn't happen if logic is correct)
+    if (any(is.na(w_subset))) {
+      w_subset <- rep(1, length(w_subset)) 
+    }
+    
+    # Re-normalize weights to sum to 1 for this specific model
+    w_subset_norm <- w_subset / sum(w_subset)
+    
+    # The final Score is the Weighted Average of the weekly WIS scores
+    scores[[mn]] <- sum(wis_by_date$daily_avg_wis * w_subset_norm)
   }
+  
   valid <- !is.na(unlist(scores))
-  if (!any(valid)) {
-    w <- rep(1/length(model_dfs), length(model_dfs)); names(w) <- names(model_dfs); return(w)
-  }
-  # Guard: if none valid, fall back to equal weights
+  
+  # 4. Standard Inverse Weighting (Higher Score/WIS = Lower Ensemble Weight)
   if (!any(valid)) {
     return(setNames(rep(1/length(model_dfs), length(model_dfs)), names(model_dfs)))
   }
-  inv <- 1 / unlist(scores[valid])
+  
+  # Invert scores (minimize WIS)
+  # Add small epsilon to avoid division by zero if a model has perfect score (0)
+  scores_vec <- unlist(scores[valid])
+  inv <- 1 / (scores_vec + 1e-8)
+  
+  # Normalize to sum to 1
   weights <- inv / sum(inv)
+  
   out <- rep(0, length(model_dfs)); names(out) <- names(model_dfs)
   out[names(weights)] <- weights
   out
@@ -268,19 +408,24 @@ for (h in 1:4) {
     weights <- setNames(rep(1/length(unique_models), length(unique_models)), unique_models)
   }
 
+  # We need the list of quantiles we are targeting (CDC_QUANTILES)
+  # Ensure they are sorted
+  target_taus <- sort(CDC_QUANTILES)
+
   ensemble <- combined %>%
-    group_by(reference_date, target_end_date, location, output_type, output_type_id) %>%
-    summarise(
-      value = {
-        vs <- value; ms <- source_model
-        wsum <- 0; wtot <- 0
-        for (i in seq_along(vs)) {
-          w <- weights[ms[i]]; if (is.na(w) || w <= 0) next
-          wsum <- wsum + vs[i] * w; wtot <- wtot + w
-        }
-        if (wtot > 0) wsum / wtot else mean(vs, na.rm = TRUE)
-      }, .groups = 'drop') %>%
-    mutate(horizon = h - 1, target = 'wk inc flu hosp', reference_date = submission_ref_date) %>%
+    # Group by the specific forecasting instance (Location + Date)
+    # CRITICAL: Do NOT group by output_type_id here. 
+    group_by(reference_date, target_end_date, location, output_type) %>%
+    reframe( # reframe allows returning multiple rows per group
+      # Call the helper function
+      value = calculate_linear_pool(pick(everything()), weights, target_taus),
+      output_type_id = target_taus
+    ) %>%
+    mutate(
+      horizon = h - 1, 
+      target = 'wk inc flu hosp', 
+      reference_date = submission_ref_date
+    ) %>%
     select(reference_date, horizon, target, target_end_date, location, output_type, output_type_id, value)
 
   all_ensembles[[paste0('h', h)]] <- ensemble

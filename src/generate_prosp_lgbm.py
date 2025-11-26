@@ -415,6 +415,7 @@ class ProspectiveForecastGenerator:
                 'horizon': self.horizon,
                 'mu': forecast['mu'],
                 'sigma': forecast['sigma'],
+                'bias_applied': forecast.get('bias_applied', 0.0),
                 'median_forecast': forecast['quantile_forecasts'][11],  # 0.5 quantile
                 'lower_95': forecast['quantile_forecasts'][1],  # 0.025 quantile
                 'upper_95': forecast['quantile_forecasts'][21]  # 0.975 quantile
@@ -495,7 +496,7 @@ def main():
         forecasts_local = {}
         # repeat core of generate_forecasts with small duplication to expose models
         # Load data is already called
-        print(f"\nGenerating prospective forecasts...")
+        print(f"\nGenerating prospective forecasts with residual bias correction...")
         all_forecasts_local = {}
         for location in generator.hyperparams.keys():
             print(f"  Generating forecast for {location}")
@@ -506,22 +507,31 @@ def main():
                 lags = stage1_params['lags']
                 selected_states = stage1_params['selected_states']
                 use_enhanced = (lags is None)
+                
+                # 1. Train models on FULL history
                 if use_enhanced:
                     X_train, y_train, _ = create_enhanced_features(generator.data, location, selected_states, end_date=None, horizon=generator.horizon)
                 else:
                     X_train, y_train, _ = create_features(generator.data, location, selected_states, lags, end_date=None, horizon=generator.horizon)
                 if len(X_train) < 50:
                     continue
-                if generator.use_log_transform.get(location, False):
+                    
+                # Log transform handling
+                use_log = generator.use_log_transform.get(location, False)
+                if use_log:
                     X_train_transformed = np.log1p(np.maximum(X_train, 0))
                     y_train_transformed = np.log1p(np.maximum(y_train, 0))
                 else:
                     X_train_transformed = X_train
                     y_train_transformed = y_train
+                    
+                # Stage 1 Training
                 dtrain1 = lgb.Dataset(X_train_transformed, label=y_train_transformed, params={'verbose': -1})
                 p1 = stage1_params['best_params'].copy(); p1['verbose'] = -1; p1['verbosity'] = -1
                 final_stage1 = lgb.train(p1, dtrain1, num_boost_round=stage1_params['num_boost_round'], callbacks=[])
                 generator._final_stage1_models[location] = final_stage1
+                
+                # Stage 2 Training
                 mu_predictions = final_stage1.predict(X_train_transformed)
                 init_score = np.column_stack([mu_predictions, np.zeros_like(mu_predictions)]).ravel(order='F')
                 dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score, params={'verbose': -1})
@@ -530,37 +540,98 @@ def main():
                 final_stage2.train(p2, dtrain2, num_boost_round=stage2_params['num_boost_round'])
                 generator._final_stage2_models[location] = final_stage2
 
+                # 2. Calculate Residual Bias (Median) over a validation window (e.g., last 8 weeks)
+                # We use an expanding window over the last few known points
+                bias_residuals = []
+                dates_sorted = sorted(generator.data['date'].unique())
+                # Look back up to 8 weeks for validation
+                val_anchors = [d for d in dates_sorted if d <= generator.last_date - pd.Timedelta(weeks=generator.horizon)]
+                val_anchors = val_anchors[-8:] 
+                
+                # To save time, we do NOT retrain for every point in this validation window. 
+                # We rely on the model trained on full data to predict recent past points.
+                # This is "in-sample" error on recent data, which acts as a proxy for "recent bias".
+                # Strictly, out-of-sample is better, but computationally expensive here.
+                # Given the robust feature set, recent in-sample residuals are often sufficient to detect systematic lag.
+                
+                for anchor in val_anchors:
+                    target_d = anchor + pd.Timedelta(weeks=generator.horizon)
+                    if target_d > generator.last_date:
+                        continue
+                    
+                    # Get features for this anchor
+                    if use_enhanced:
+                        X_anc, _ = create_enhanced_features_for_prediction(generator.data, location, selected_states, anchor_date=anchor, horizon=generator.horizon)
+                    else:
+                        X_anc, _ = create_features_for_prediction(generator.data, location, selected_states, lags, anchor_date=anchor, horizon=generator.horizon)
+                    
+                    if len(X_anc) == 0: continue
+                    
+                    # Predict
+                    if use_log:
+                        X_anc = np.log1p(np.maximum(X_anc, 0))
+                    
+                    mu_anc = final_stage1.predict(X_anc[-1:])[0]
+                    if use_log: mu_anc = np.expm1(mu_anc)
+                    
+                    # Actual
+                    actual = generator.data.loc[generator.data['date'] == target_d, location].values
+                    if len(actual) > 0:
+                        res = actual[0] - mu_anc
+                        bias_residuals.append(res)
+                
+                median_bias = np.median(bias_residuals) if len(bias_residuals) > 0 else 0.0
+                # Dampen bias if it's very large (heuristic safety)
+                # median_bias = np.sign(median_bias) * min(abs(median_bias), 50.0) # Optional safety cap?
+                
+                # 3. Generate Prospective Prediction
                 if use_enhanced:
                     X_pred, _ = create_enhanced_features_for_prediction(generator.data, location, selected_states, anchor_date=generator.last_date, horizon=generator.horizon)
                 else:
                     X_pred, _ = create_features_for_prediction(generator.data, location, selected_states, lags, anchor_date=generator.last_date, horizon=generator.horizon)
                 if len(X_pred) == 0:
                     continue
-                if generator.use_log_transform.get(location, False):
+                
+                if use_log:
                     X_pred_transformed = np.log1p(np.maximum(X_pred, 0))
                 else:
                     X_pred_transformed = X_pred
+                    
                 mu_pred = final_stage1.predict(X_pred_transformed[-1:])[0]
-                if generator.use_log_transform.get(location, False):
+                if use_log:
                     mu_pred = np.expm1(mu_pred)
+                
+                # APPLY BIAS CORRECTION
+                mu_pred_corrected = mu_pred + median_bias
+                # Ensure non-negative
+                mu_pred_corrected = max(0.0, mu_pred_corrected)
+                
+                print(f"    Bias correction for {location}: {median_bias:.2f} (Raw μ: {mu_pred:.2f} -> Corrected: {mu_pred_corrected:.2f})")
+
+                # Stage 2 prediction
                 dist_params = final_stage2.predict(X_pred_transformed[-1:], pred_type="parameters")
                 if hasattr(dist_params, 'values'):
                     dist_params = dist_params.values
                 sigma_pred = dist_params[0, 1] if dist_params.ndim > 1 else dist_params[1]
                 sigma_pred = max(float(sigma_pred), 1e-6)
-                if generator.use_log_transform.get(location, False):
-                    sigma_pred = sigma_pred * mu_pred
+                
+                if use_log:
+                    # Approximate scaling for log-normal-ish behavior
+                    sigma_pred = sigma_pred * mu_pred_corrected
+                
                 from scipy.stats import norm
-                qvals = np.array([max(0.0, norm.ppf(q, loc=mu_pred, scale=sigma_pred)) for q in CDC_QUANTILES])
+                qvals = np.array([max(0.0, norm.ppf(q, loc=mu_pred_corrected, scale=sigma_pred)) for q in CDC_QUANTILES])
                 target_date = generator.last_date + pd.Timedelta(weeks=generator.horizon)
                 all_forecasts_local[location] = {
                     'forecast_date': generator.last_date,
                     'target_date': target_date,
-                    'mu': mu_pred,
+                    'mu': mu_pred_corrected,
                     'sigma': sigma_pred,
-                    'quantile_forecasts': qvals
+                    'quantile_forecasts': qvals,
+                    'bias_applied': median_bias
                 }
             except Exception as e:
+                print(f"    Error: {e}")
                 continue
         return all_forecasts_local
 

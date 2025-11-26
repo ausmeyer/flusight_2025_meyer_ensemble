@@ -189,9 +189,9 @@ class RetrospectiveForecastGenerator:
         print(f"Validation period: {val_weeks} weeks from {self.cut_off_date.strftime('%Y-%m-%d')} onwards")
         
     def generate_model_forecasts(self) -> Dict:
-        """Generate two-stage model forecasts using expanding window validation."""
+        """Generate two-stage model forecasts using expanding window validation with residual bias correction."""
         
-        print(f"\\nGenerating two-stage model forecasts...")
+        print(f"\\nGenerating two-stage model forecasts with bias correction...")
         
         all_forecasts = {}
         
@@ -206,23 +206,14 @@ class RetrospectiveForecastGenerator:
             selected_states = stage1_params['selected_states']
             
             # Guard: Ensure we have lags and no lag_0 (data leakage)
-            # Handle case where enhanced features were used (lags = None)
             if lags is None:
-                # Enhanced features mode - no explicit lags needed
-                print(f"    Using enhanced features mode (no explicit lags)")
                 use_enhanced = True
             else:
                 use_enhanced = False
                 if len(lags) == 0:
-                    raise ValueError(
-                        f"{location}: no lags specified. "
-                        "Ensure hyperparameters were trained properly."
-                    )
+                    raise ValueError(f"{location}: no lags specified.")
                 if min(lags) < 1:
-                    raise ValueError(
-                        f"{location}: lag_0 detected in {lags}. "
-                        "Lag 0 would cause data leakage."
-                    )
+                    raise ValueError(f"{location}: lag_0 detected in {lags}.")
             
             # Get models
             stage1_model = self.stage1_models[location]
@@ -232,8 +223,7 @@ class RetrospectiveForecastGenerator:
             train_data = self.data[self.data['date'] < self.cut_off_date]
             first_anchor_date = train_data['date'].max() if len(train_data) > 0 else self.cut_off_date
             
-            # Get validation dates starting from the first anchor date
-            # But make sure we only use dates that actually exist in the data
+            # Get validation dates
             val_data = self.data[self.data['date'] >= first_anchor_date].copy()
             val_dates = sorted(val_data['date'].unique())
             all_dates = sorted(self.data['date'].unique())
@@ -252,13 +242,12 @@ class RetrospectiveForecastGenerator:
                 
                 try:
                     # Expanding window: include all previous validation points in training
-                    # For the first forecast, train_end_date should be the last training date
                     if i == 0:
                         train_end_date = first_anchor_date
                     else:
                         train_end_date = val_date - pd.Timedelta(days=1)
                     
-                    # Create training features up to train_end_date
+                    # Create training features
                     if use_enhanced:
                         X_train, y_train, _ = create_enhanced_features(
                             self.data, location, selected_states,
@@ -280,6 +269,60 @@ class RetrospectiveForecastGenerator:
                     else:
                         X_train_transformed = X_train
                         y_train_transformed = y_train
+
+                    # Re-train models on expanding window
+                    with redirect_stdout(StringIO()):
+                        dtrain1 = lgb.Dataset(X_train_transformed, label=y_train_transformed)
+                        p1 = stage1_params['best_params'].copy(); p1['verbose'] = -1; p1['verbosity'] = -1
+                        temp_stage1 = lgb.train(
+                            p1, 
+                            dtrain1, 
+                            num_boost_round=stage1_params['num_boost_round'],
+                            callbacks=[]
+                        )
+
+                        mu_predictions = temp_stage1.predict(X_train_transformed)
+                        init_score = np.column_stack([mu_predictions, np.zeros_like(mu_predictions)]).ravel(order='F')
+
+                        dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score)
+                        temp_stage2 = LightGBMLSS(GaussianFrozenLoc())
+                        p2 = stage2_params['best_params'].copy(); p2['verbose'] = -1; p2['verbosity'] = -1
+                        temp_stage2.train(
+                            p2, 
+                            dtrain2, 
+                            num_boost_round=stage2_params['num_boost_round']
+                        )
+
+                    # --- BIAS CORRECTION LOGIC ---
+                    bias_residuals = []
+                    lookback_start = val_date - pd.Timedelta(weeks=8)
+                    potential_anchors = [d for d in all_dates if lookback_start <= d <= train_end_date]
+
+                    for anchor in potential_anchors:
+                        target_d = anchor + pd.Timedelta(weeks=self.horizon)
+                        if target_d > train_end_date:
+                            continue
+                        
+                        if use_enhanced:
+                            X_anc, _ = create_enhanced_features_for_prediction(self.data, location, selected_states, anchor_date=anchor, horizon=self.horizon)
+                        else:
+                            X_anc, _ = create_features_for_prediction(self.data, location, selected_states, lags, anchor_date=anchor, horizon=self.horizon)
+                        
+                        if len(X_anc) == 0: continue
+
+                        if self.use_log_transform.get(location, False):
+                            X_anc = np.log1p(np.maximum(X_anc, 0))
+                        
+                        mu_anc = temp_stage1.predict(X_anc[-1:])[0]
+                        if self.use_log_transform.get(location, False):
+                            mu_anc = np.expm1(mu_anc)
+                            
+                        actual_h = self.data.loc[self.data['date'] == target_d, location].values
+                        if len(actual_h) > 0:
+                            bias_residuals.append(actual_h[0] - mu_anc)
+                    
+                    median_bias = np.median(bias_residuals) if len(bias_residuals) > 0 else 0.0
+                    # --- END BIAS CORRECTION ---
                     
                     # Create prediction features using prediction-mode creators
                     if use_enhanced:
@@ -303,12 +346,7 @@ class RetrospectiveForecastGenerator:
                         X_pred_transformed = X_pred
                     
                     # Compute target date (anchor + horizon)
-                    # Note: times from tabularizer are for training samples, not predictions
                     target_date = val_date + pd.Timedelta(weeks=self.horizon)
-                    
-                    # Validation logging for anchor/target alignment
-                    if i == 0 or i == len(val_dates_to_use) - 1:
-                        print(f"      [VALIDATION] Anchor={val_date.strftime('%Y-%m-%d')}, Target={target_date.strftime('%Y-%m-%d')} (h={self.horizon})")
                     
                     if target_date not in all_dates:
                         continue
@@ -319,41 +357,6 @@ class RetrospectiveForecastGenerator:
                         continue
                     actual_value = actual_value.iloc[0]
                     
-                    # Re-train models on expanding window
-                    # Re-train Stage 1 model (use transformed data)
-                    dtrain1 = lgb.Dataset(X_train_transformed, label=y_train_transformed, params={'verbose': -1})
-                    p1 = stage1_params['best_params'].copy()
-                    p1['verbose'] = -1
-                    p1['verbosity'] = -1
-                    temp_stage1 = lgb.train(
-                        p1, 
-                        dtrain1, 
-                        num_boost_round=stage1_params['num_boost_round'],
-                        callbacks=[]
-                    )
-
-                    # Get μ predictions for training data (in log space if transformed)
-                    mu_predictions = temp_stage1.predict(X_train_transformed)
-
-                    # Re-train Stage 2 model with frozen μ
-                    # NEW: Flatten init_score (Fortran order)
-                    init_score = np.column_stack([
-                        mu_predictions,
-                        np.zeros_like(mu_predictions)
-                    ]).ravel(order='F')
-
-                    dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score, params={'verbose': -1})
-                    temp_stage2 = LightGBMLSS(GaussianFrozenLoc())
-                    p2 = stage2_params['best_params'].copy()
-                    p2['verbose'] = -1
-                    p2['verbosity'] = -1
-                    temp_stage2.train(
-                        p2, 
-                        dtrain2, 
-                        num_boost_round=stage2_params['num_boost_round']
-                    )
-                    
-                    # Use the already created X_pred from above (transformed)
                     X_pred_last = X_pred_transformed[-1:]
                     
                     # Get μ prediction from Stage 1
@@ -362,6 +365,9 @@ class RetrospectiveForecastGenerator:
                     # Inverse transform μ if using log
                     if self.use_log_transform.get(location, False):
                         mu_pred = np.expm1(mu_pred)
+                    
+                    # APPLY BIAS
+                    mu_pred_corrected = max(0.0, mu_pred + median_bias)
                     
                     # Get σ prediction from Stage 2
                     dist_params = temp_stage2.predict(X_pred_last, pred_type="parameters")
@@ -377,15 +383,13 @@ class RetrospectiveForecastGenerator:
                     
                     # If using log transform, scale sigma appropriately
                     if self.use_log_transform.get(location, False):
-                        # Convert sigma from log space to original space
-                        # This is approximate - assumes log-normal distribution
-                        sigma_pred = sigma_pred * mu_pred
+                        sigma_pred = sigma_pred * mu_pred_corrected
                     
                     # Generate quantile forecasts
                     from scipy.stats import norm
                     quantile_forecasts = []
                     for q in self.quantiles:
-                        pred = norm.ppf(q, loc=mu_pred, scale=sigma_pred)
+                        pred = norm.ppf(q, loc=mu_pred_corrected, scale=sigma_pred)
                         quantile_forecasts.append(max(pred, 0.0))  # Truncate negatives
                     
                     forecast_results.append({

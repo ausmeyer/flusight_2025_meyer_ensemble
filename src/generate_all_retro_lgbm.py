@@ -309,9 +309,9 @@ class BatchRetrospectiveForecastGenerator:
     def generate_model_forecasts(self, hyperparams: Dict, stage1_models: Dict, 
                                  stage2_models: Dict, use_log_transform: Dict, 
                                  horizon: int) -> Dict:
-        """Generate two-stage model forecasts using expanding window validation."""
+        """Generate two-stage model forecasts using expanding window validation with residual bias correction."""
         
-        print(f"\nGenerating two-stage model forecasts...")
+        print(f"\nGenerating two-stage model forecasts with bias correction...")
         
         all_forecasts = {}
         
@@ -330,7 +330,6 @@ class BatchRetrospectiveForecastGenerator:
             
             # Check if using enhanced features
             if lags is None:
-                print(f"    Using enhanced features mode")
                 use_enhanced = True
             else:
                 use_enhanced = False
@@ -338,10 +337,6 @@ class BatchRetrospectiveForecastGenerator:
                     raise ValueError(f"{location}: no lags specified")
                 if min(lags) < 1:
                     raise ValueError(f"{location}: lag_0 detected in {lags}")
-            
-            # Get models
-            stage1_model = stage1_models[location]
-            stage2_model = stage2_models[location]
             
             # Get training data last date
             train_data = self.data[self.data['date'] < self.cut_off_date]
@@ -390,39 +385,6 @@ class BatchRetrospectiveForecastGenerator:
                         X_train_transformed = X_train
                         y_train_transformed = y_train
                     
-                    # Create prediction features
-                    if use_enhanced:
-                        X_pred, _ = create_enhanced_features_for_prediction(
-                            self.data, location, selected_states,
-                            anchor_date=val_date, horizon=horizon
-                        )
-                    else:
-                        X_pred, _ = create_features_for_prediction(
-                            self.data, location, selected_states, lags,
-                            anchor_date=val_date, horizon=horizon
-                        )
-                    
-                    if len(X_pred) == 0:
-                        continue
-                    
-                    # Apply log transformation to prediction features
-                    if use_log_transform.get(location, False):
-                        X_pred_transformed = np.log1p(np.maximum(X_pred, 0))
-                    else:
-                        X_pred_transformed = X_pred
-                    
-                    # Compute target date
-                    target_date = val_date + pd.Timedelta(weeks=horizon)
-                    
-                    if target_date not in all_dates:
-                        continue
-                    
-                    # Get actual value
-                    actual_value = self.data.loc[self.data['date'] == target_date, location]
-                    if len(actual_value) == 0:
-                        continue
-                    actual_value = actual_value.iloc[0]
-                    
                     # Re-train models on expanding window
                     with redirect_stdout(StringIO()):
                         # Re-train Stage 1 model
@@ -450,6 +412,79 @@ class BatchRetrospectiveForecastGenerator:
                             dtrain2, 
                             num_boost_round=stage2_params['num_boost_round']
                         )
+
+                    # --- CALCULATE MEDIAN BIAS (Validation on Recent Past) ---
+                    # Predict for anchors in [val_date - 8 weeks, val_date - 1 week]
+                    bias_residuals = []
+                    
+                    # Define lookback window
+                    lookback_start = val_date - pd.Timedelta(weeks=8)
+                    # We need anchors where (anchor + horizon) is known (<= train_end_date) 
+                    # Actually, strictly speaking, we know outcomes up to train_end_date.
+                    # So we can validate on anchors where anchor+horizon <= train_end_date.
+                    
+                    # Get potential anchors
+                    potential_anchors = [d for d in all_dates if lookback_start <= d <= train_end_date]
+                    
+                    for anchor in potential_anchors:
+                        target_d = anchor + pd.Timedelta(weeks=horizon)
+                        # Can only validate if outcome is known
+                        if target_d > train_end_date:
+                            continue
+                            
+                        if use_enhanced:
+                            X_anc, _ = create_enhanced_features_for_prediction(self.data, location, selected_states, anchor_date=anchor, horizon=horizon)
+                        else:
+                            X_anc, _ = create_features_for_prediction(self.data, location, selected_states, lags, anchor_date=anchor, horizon=horizon)
+                        
+                        if len(X_anc) == 0: continue
+                        
+                        if use_log_transform.get(location, False):
+                            X_anc = np.log1p(np.maximum(X_anc, 0))
+                        
+                        mu_anc = temp_stage1.predict(X_anc[-1:])[0]
+                        if use_log_transform.get(location, False):
+                            mu_anc = np.expm1(mu_anc)
+                            
+                        actual_h = self.data.loc[self.data['date'] == target_d, location].values
+                        if len(actual_h) > 0:
+                            bias_residuals.append(actual_h[0] - mu_anc)
+                    
+                    median_bias = np.median(bias_residuals) if len(bias_residuals) > 0 else 0.0
+                    
+                    # Debug logging for bias
+                    if i % progress_interval == 0:
+                        print(f"      [BIAS] {location} @ {val_date.date()}: Found {len(bias_residuals)} residuals. Median Bias={median_bias:.4f}")
+
+                    # --- END BIAS CALCULATION ---
+
+                    # Create prediction features for current val_date
+                    if use_enhanced:
+                        X_pred, _ = create_enhanced_features_for_prediction(
+                            self.data, location, selected_states,
+                            anchor_date=val_date, horizon=horizon
+                        )
+                    else:
+                        X_pred, _ = create_features_for_prediction(
+                            self.data, location, selected_states, lags,
+                            anchor_date=val_date, horizon=horizon
+                        )
+                    
+                    if len(X_pred) == 0:
+                        continue
+                    
+                    # Apply log transformation to prediction features
+                    if use_log_transform.get(location, False):
+                        X_pred_transformed = np.log1p(np.maximum(X_pred, 0))
+                    else:
+                        X_pred_transformed = X_pred
+                    
+                    # Compute target date
+                    target_date = val_date + pd.Timedelta(weeks=horizon)
+                    if target_date not in all_dates: continue
+                    actual_value = self.data.loc[self.data['date'] == target_date, location]
+                    if len(actual_value) == 0: continue
+                    actual_value = actual_value.iloc[0]
                     
                     # Get predictions
                     X_pred_last = X_pred_transformed[-1:]
@@ -461,6 +496,9 @@ class BatchRetrospectiveForecastGenerator:
                     if use_log_transform.get(location, False):
                         mu_pred = np.expm1(mu_pred)
                     
+                    # APPLY BIAS CORRECTION
+                    mu_pred_corrected = max(0.0, mu_pred + median_bias)
+
                     # Get σ prediction
                     dist_params = temp_stage2.predict(X_pred_last, pred_type="parameters")
                     if hasattr(dist_params, 'values'):
@@ -475,20 +513,22 @@ class BatchRetrospectiveForecastGenerator:
                     
                     # Scale sigma if using log transform
                     if use_log_transform.get(location, False):
-                        sigma_pred = sigma_pred * mu_pred
+                        sigma_pred = sigma_pred * mu_pred_corrected
                     
                     # Generate quantile forecasts
                     from scipy.stats import norm
                     quantile_forecasts = []
                     for q in self.quantiles:
-                        pred = norm.ppf(q, loc=mu_pred, scale=sigma_pred)
+                        pred = norm.ppf(q, loc=mu_pred_corrected, scale=sigma_pred)
                         quantile_forecasts.append(max(pred, 0.0))
                     
                     forecast_results.append({
                         'forecast_date': val_date,
                         'target_date': target_date,
                         'actual_value': actual_value,
-                        'quantile_forecasts': np.array(quantile_forecasts)
+                        'quantile_forecasts': np.array(quantile_forecasts),
+                        'bias_applied': median_bias,
+                        'mu_uncorrected': mu_pred
                     })
                         
                 except Exception as e:
@@ -658,6 +698,33 @@ class BatchRetrospectiveForecastGenerator:
             print(f"  Baseline forecasts saved: {persistence_file}")
         else:
             print("  No baseline forecasts generated; skipping baseline file.")
+
+        # Save summary statistics (NEW)
+        summary_stats = []
+        for location in model_forecasts.keys():
+            # Defensive check for empty forecasts
+            if len(model_forecasts[location]) == 0:
+                continue
+            
+            model_preds = [f['quantile_forecasts'][11] for f in model_forecasts[location]]  # median
+            actuals = [f['actual_value'] for f in model_forecasts[location]]
+            biases = [f.get('bias_applied', 0.0) for f in model_forecasts[location]]
+            
+            summary_stats.append({
+                'location': location,
+                'n_forecasts': len(actuals),
+                'actual_mean': np.mean(actuals),
+                'actual_std': np.std(actuals),
+                'model_median_mean': np.mean(model_preds),
+                'mean_bias_applied': np.mean(biases),
+                'date_range': f"{model_forecasts[location][0]['forecast_date'].strftime('%Y-%m-%d')} to {model_forecasts[location][-1]['forecast_date'].strftime('%Y-%m-%d')}"
+            })
+        
+        if summary_stats:
+            summary_df = pd.DataFrame(summary_stats)
+            summary_file = os.path.join(output_dir, f"forecast_summary_h{horizon}.csv")
+            summary_df.to_csv(summary_file, index=False)
+            print(f"  Summary statistics saved to: {summary_file}")
 
 
 def main():
