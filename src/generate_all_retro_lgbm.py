@@ -352,6 +352,7 @@ class BatchRetrospectiveForecastGenerator:
                 
             forecast_results = []
             total_dates = len(val_dates_to_use)
+            progress_interval = max(1, total_dates // 10)
             
             # Expanding window validation
             for i, val_date in enumerate(val_dates_to_use):
@@ -532,6 +533,7 @@ class BatchRetrospectiveForecastGenerator:
                     })
                         
                 except Exception as e:
+                    print(f"      [ERROR] {location} @ {val_date.date()}: {str(e)}")
                     continue
                     
             all_forecasts[location] = forecast_results
