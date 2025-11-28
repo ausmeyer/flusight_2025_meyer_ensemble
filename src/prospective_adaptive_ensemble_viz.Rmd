@@ -26,6 +26,7 @@ library(readr)
 library(lubridate)
 library(ggplot2)
 library(tidyr)
+library(plotly)
 ```
 
 ```{r load-data}
@@ -46,12 +47,17 @@ if (is.na(prospective_path)) stop('No prospective adaptive ensemble found in for
 actual_raw <- read_csv(actual_path, show_col_types = FALSE)
 prospective <- read_csv(prospective_path, show_col_types = FALSE)
 
+# Extract timestamp from ensemble filename to find matching components
+# Filename format: AdaptiveEnsemble_prospective_YYYYMMDD.csv
+ts_match <- regexpr("\\d{8}", basename(prospective_path))
+ts_str <- regmatches(basename(prospective_path), ts_match)
+
 # Prepare ground truth (since 2024-07-01)
 actual <- actual_raw %>%
   select(location_name, date, total_hosp) %>%
-  mutate(date = as.Date(date)) %>%
-  filter(date >= as.Date('2024-07-01')) %>%
-  arrange(location_name, date)
+  mutate(target_end_date = as.Date(date)) %>%
+  filter(target_end_date >= as.Date('2024-07-01')) %>%
+  arrange(location_name, target_end_date)
 
 # FIPS -> name mapping for annotations
 fips_to_name <- c(
@@ -71,7 +77,7 @@ fips_to_name <- c(
   'US' = 'US'
 )
 
-# Summarise quantiles across all horizons; keep ribbons per target_end_date
+# Summarise quantiles for Ensemble
 prospective_q <- prospective %>%
   filter(output_type == 'quantile') %>%
   mutate(output_type_id = as.numeric(output_type_id),
@@ -97,32 +103,110 @@ prospective_q <- prospective %>%
   ) %>%
   mutate(location_name = fips_to_name[location])
 
-# Determine last actual date per location and keep forecasts strictly after that
+# Determine last actual date per location
 last_actual <- actual %>% group_by(location_name) %>% summarise(last_date = max(date), .groups = 'drop')
 prospective_q <- prospective_q %>% left_join(last_actual, by = 'location_name') %>%
   filter(target_end_date > last_date)
+
+# Load Component Models (ARIMA, SVM, LGBM)
+component_data <- list()
+for (h in 1:4) {
+  # Define file patterns
+  files <- list(
+    ARIMA = file.path('../forecasts/prospective', sprintf("ARIMA_h%d_prospective_%s.csv", h, ts_str)),
+    SVM   = file.path('../forecasts/prospective', sprintf("SVM_h%d_prospective_%s.csv", h, ts_str))
+  )
+  
+  # Glob for LGBM since filenames might vary (t10 vs t100)
+  lgbm100_files <- list.files('../forecasts/prospective', pattern = sprintf("TwoStage-FrozenMu-t100_h%d_prospective_%s.csv", h, ts_str), full.names = TRUE)
+  if(length(lgbm100_files) > 0) files$LGBM_t100 <- lgbm100_files[1]
+  
+  lgbm10_files <- list.files('../forecasts/prospective', pattern = sprintf("TwoStage-FrozenMu-t10_h%d_prospective_%s.csv", h, ts_str), full.names = TRUE)
+  if(length(lgbm10_files) > 0) files$LGBM_t10 <- lgbm10_files[1]
+  
+  for (m_name in names(files)) {
+    if (file.exists(files[[m_name]])) {
+      df <- read_csv(files[[m_name]], show_col_types = FALSE)
+      if(nrow(df) > 0) {
+        # Extract median only
+        df_med <- df %>%
+          filter(output_type == 'quantile', abs(as.numeric(output_type_id) - 0.5) < 0.01) %>%
+          mutate(target_end_date = as.Date(target_end_date), 
+                 location_name = fips_to_name[as.character(location)],
+                 model = m_name) %>%
+          select(location_name, target_end_date, value, model)
+        component_data[[length(component_data)+1]] <- df_med
+      }
+    }
+  }
+}
+
+comp_df <- data.frame(
+  location_name = character(), 
+  target_end_date = as.Date(character()), 
+  value = numeric(), 
+  model = character()
+)
+
+if(length(component_data) > 0) {
+  comp_df <- bind_rows(component_data)
+}
+
+# Filter components to future dates only (same as ensemble)
+if(nrow(comp_df) > 0) {
+  comp_df <- comp_df %>% 
+    left_join(last_actual, by = 'location_name') %>%
+    filter(target_end_date > last_date)
+}
 ```
 
-```{r plot, fig.height = 20, fig.width = 8, fig.align='center'}
+```{r plot, fig.height = 20, fig.width = 10, fig.align='center'}
+# Colors for models
+model_colors <- c(
+  "Ensemble"  = "#cc5200", 
+  "ARIMA"     = "#1f77b4", 
+  "SVM"       = "#2ca02c", 
+  "LGBM_t100" = "#9467bd", 
+  "LGBM_t10"  = "#8c564b"
+)
+
 p <- ggplot() +
-  # Prospective bands
-  geom_ribbon(data = prospective_q, aes(x = target_end_date, ymin = q01, ymax = q99), fill = '#ffd9b3', alpha = 0.3) +
-  geom_ribbon(data = prospective_q, aes(x = target_end_date, ymin = q05, ymax = q95), fill = '#ffb366', alpha = 0.4) +
-  geom_ribbon(data = prospective_q, aes(x = target_end_date, ymin = q25, ymax = q75), fill = '#ff8c1a', alpha = 0.5) +
-  geom_line(data = prospective_q, aes(x = target_end_date, y = median), color = '#cc5200', linewidth = 0.2) +
-  geom_point(data = prospective_q, aes(x = target_end_date, y = median), color = '#cc5200', size = 0.2) +
+  # Prospective bands (Ensemble)
+  geom_ribbon(data = prospective_q, aes(x = target_end_date, ymin = q01, ymax = q99, fill = "99%"), alpha = 0.2) +
+  geom_ribbon(data = prospective_q, aes(x = target_end_date, ymin = q05, ymax = q95, fill = "90%"), alpha = 0.3) +
+  geom_ribbon(data = prospective_q, aes(x = target_end_date, ymin = q25, ymax = q75, fill = "50%"), alpha = 0.4) +
   
   # Ground truth
-  geom_line(data = actual, aes(x = date, y = total_hosp), color = 'black', linewidth = 0.2) +
-  geom_point(data = actual, aes(x = date, y = total_hosp), color = 'black', size = 0.2, alpha = 0.6) +
+  geom_line(data = actual, aes(x = target_end_date, y = total_hosp, group = 1), color = 'black', linewidth = 0.3) +
   
-  facet_wrap(~ location_name, scales = 'free_y', ncol = 3) +
-  theme_bw() +
-  labs(title = 'Prospective Adaptive Ensemble: Quantile Bands and History',
-       subtitle = 'Bands: 1-99 (light), 5-95 (med), 25-75 (dark). Median in orange. History since 2023-07-01.',
-       x = 'Date', y = 'Weekly incident flu hospitalizations') + 
-  theme_bw(base_size = 8)
+  # Ensemble Median Line
+  geom_line(data = prospective_q, aes(x = target_end_date, y = median, color = "Ensemble"), linewidth = 0.6)
 
-print(p)
+if (nrow(comp_df) > 0) {
+  p <- p + geom_line(data = comp_df, aes(x = target_end_date, y = value, color = model, group = model), linewidth = 0.4, alpha = 0.8)
+}
+
+p <- p +
+  facet_wrap(~ location_name, scales = 'free_y', ncol = 3) +
+  theme_bw(base_size = 10) +
+  scale_color_manual(name = "Model", values = model_colors) +
+  scale_fill_manual(name = "Interval", values = c("99%"='#ffd9b3', "90%"='#ffb366', "50%"='#ff8c1a')) +
+  labs(title = paste0('Prospective Forecasts (', ts_str, ')'),
+       x = 'Date', y = 'Weekly Hospitalizations')
+
+# Convert to interactive Plotly
+# Note: Faceted plots can be heavy. We enable legend toggling.
+gp <- ggplotly(p) %>%
+  layout(
+    legend = list(
+      orientation = "h", 
+      x = 0, y = -0.05
+    ),
+    title = list(
+      text = paste0('Prospective Forecasts (', ts_str, ')<br><sup>Ensemble Bands + Component Medians. Click legend to toggle models.</sup>')
+    )
+  )
+
+gp
 ```
 

@@ -306,28 +306,32 @@ class BatchRetrospectiveForecastGenerator:
         # Save forecasts (without summary)
         self.save_forecasts(model_forecasts, persistence_forecasts, horizon, output_dir)
         
-    def generate_model_forecasts(self, hyperparams: Dict, stage1_models: Dict, 
-                                 stage2_models: Dict, use_log_transform: Dict, 
+    def generate_model_forecasts(self, hyperparams: Dict, stage1_models: Dict,
+                                 stage2_models: Dict, use_log_transform: Dict,
                                  horizon: int) -> Dict:
-        """Generate two-stage model forecasts using expanding window validation with residual bias correction."""
-        
-        print(f"\nGenerating two-stage model forecasts with bias correction...")
-        
+        """Generate two-stage model forecasts using expanding window validation with conformal residual quantiles."""
+
+        print(f"\nGenerating two-stage model forecasts (using conformal residual quantiles on log1p scale)...")
+
         all_forecasts = {}
-        
+
+        # Conformal residual quantiles settings
+        RESIDUAL_LOOKBACK = 12  # Keep last 12 weeks of residuals per location
+        MIN_RESIDUALS_FOR_CONFORMAL = 8  # Minimum residuals needed to use conformal quantiles
+
         for location in hyperparams.keys():
             if location not in stage1_models or location not in stage2_models:
                 continue
-                
+
             print(f"  Generating forecasts for {location}")
-            
+
             # Get model parameters
             params = hyperparams[location]
             stage1_params = params['stage1']
             stage2_params = params['stage2']
             lags = stage1_params['lags']
             selected_states = stage1_params['selected_states']
-            
+
             # Check if using enhanced features
             if lags is None:
                 use_enhanced = True
@@ -337,23 +341,25 @@ class BatchRetrospectiveForecastGenerator:
                     raise ValueError(f"{location}: no lags specified")
                 if min(lags) < 1:
                     raise ValueError(f"{location}: lag_0 detected in {lags}")
-            
+
             # Get training data last date
             train_data = self.data[self.data['date'] < self.cut_off_date]
             first_anchor_date = train_data['date'].max() if len(train_data) > 0 else self.cut_off_date
-            
+
             # Get validation dates
             val_data = self.data[self.data['date'] >= first_anchor_date].copy()
             val_dates = sorted(val_data['date'].unique())
             all_dates = sorted(self.data['date'].unique())
-            
+
             # Stop early enough to have target dates
             val_dates_to_use = val_dates[:-horizon] if len(val_dates) > horizon else []
-                
+
             forecast_results = []
             total_dates = len(val_dates_to_use)
-            progress_interval = max(1, total_dates // 10)
-            
+
+            # Rolling residual store for this location (log1p space)
+            residuals_log = []
+
             # Expanding window validation
             for i, val_date in enumerate(val_dates_to_use):
                 try:
@@ -362,7 +368,7 @@ class BatchRetrospectiveForecastGenerator:
                         train_end_date = first_anchor_date
                     else:
                         train_end_date = val_date - pd.Timedelta(days=1)
-                    
+
                     # Create training features
                     if use_enhanced:
                         X_train, y_train, _ = create_enhanced_features(
@@ -374,10 +380,10 @@ class BatchRetrospectiveForecastGenerator:
                             self.data, location, selected_states, lags,
                             end_date=train_end_date, horizon=horizon
                         )
-                    
+
                     if len(X_train) < 50:
                         continue
-                    
+
                     # Apply log transformation if enabled
                     if use_log_transform.get(location, False):
                         X_train_transformed = np.log1p(np.maximum(X_train, 0))
@@ -385,79 +391,34 @@ class BatchRetrospectiveForecastGenerator:
                     else:
                         X_train_transformed = X_train
                         y_train_transformed = y_train
-                    
+
                     # Re-train models on expanding window
                     with redirect_stdout(StringIO()):
                         # Re-train Stage 1 model
                         dtrain1 = lgb.Dataset(X_train_transformed, label=y_train_transformed)
                         temp_stage1 = lgb.train(
-                            stage1_params['best_params'], 
-                            dtrain1, 
+                            stage1_params['best_params'],
+                            dtrain1,
                             num_boost_round=stage1_params['num_boost_round'],
                             callbacks=[]
                         )
-                        
-                        # Get μ predictions for training data
+
+                        # Get μ predictions for training data (needed for Stage 2 init_score)
                         mu_predictions = temp_stage1.predict(X_train_transformed)
-                        
-                        # Re-train Stage 2 model with frozen μ
+
+                        # Re-train Stage 2 model with frozen μ (only used as fallback)
                         init_score = np.column_stack([
                             mu_predictions,
                             np.zeros_like(mu_predictions)
                         ]).ravel(order='F')
-                        
+
                         dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score)
                         temp_stage2 = LightGBMLSS(GaussianFrozenLoc())
                         temp_stage2.train(
-                            stage2_params['best_params'], 
-                            dtrain2, 
+                            stage2_params['best_params'],
+                            dtrain2,
                             num_boost_round=stage2_params['num_boost_round']
                         )
-
-                    # --- CALCULATE MEDIAN BIAS (Validation on Recent Past) ---
-                    # Predict for anchors in [val_date - 8 weeks, val_date - 1 week]
-                    bias_residuals = []
-                    
-                    # Define lookback window
-                    lookback_start = val_date - pd.Timedelta(weeks=8)
-                    # We need anchors where (anchor + horizon) is known (<= train_end_date) 
-                    # Actually, strictly speaking, we know outcomes up to train_end_date.
-                    # So we can validate on anchors where anchor+horizon <= train_end_date.
-                    
-                    # Get potential anchors
-                    potential_anchors = [d for d in all_dates if lookback_start <= d <= train_end_date]
-                    
-                    for anchor in potential_anchors:
-                        target_d = anchor + pd.Timedelta(weeks=horizon)
-                        # Can only validate if outcome is known
-                        if target_d > train_end_date:
-                            continue
-                            
-                        if use_enhanced:
-                            X_anc, _ = create_enhanced_features_for_prediction(self.data, location, selected_states, anchor_date=anchor, horizon=horizon)
-                        else:
-                            X_anc, _ = create_features_for_prediction(self.data, location, selected_states, lags, anchor_date=anchor, horizon=horizon)
-                        
-                        if len(X_anc) == 0: continue
-                        
-                        if use_log_transform.get(location, False):
-                            X_anc = np.log1p(np.maximum(X_anc, 0))
-                        
-                        mu_anc = temp_stage1.predict(X_anc[-1:])[0]
-                        if use_log_transform.get(location, False):
-                            mu_anc = np.expm1(mu_anc)
-                            
-                        actual_h = self.data.loc[self.data['date'] == target_d, location].values
-                        if len(actual_h) > 0:
-                            bias_residuals.append(actual_h[0] - mu_anc)
-                    
-                    median_bias = np.median(bias_residuals) if len(bias_residuals) > 0 else 0.0
-                    
-                    # Debug logging for bias
-                    if i % progress_interval == 0:
-                        print(f"      [BIAS] {location} @ {val_date.date()}: Found {len(bias_residuals)} residuals. Median Bias={median_bias:.4f}")
-
-                    # --- END BIAS CALCULATION ---
 
                     # Create prediction features for current val_date
                     if use_enhanced:
@@ -470,75 +431,95 @@ class BatchRetrospectiveForecastGenerator:
                             self.data, location, selected_states, lags,
                             anchor_date=val_date, horizon=horizon
                         )
-                    
+
                     if len(X_pred) == 0:
                         continue
-                    
+
                     # Apply log transformation to prediction features
                     if use_log_transform.get(location, False):
                         X_pred_transformed = np.log1p(np.maximum(X_pred, 0))
                     else:
                         X_pred_transformed = X_pred
-                    
-                    # Compute target date
+
+                    # Compute target date aligned with forecast horizon
                     target_date = val_date + pd.Timedelta(weeks=horizon)
-                    if target_date not in all_dates: continue
+                    if target_date not in all_dates:
+                        continue
                     actual_value = self.data.loc[self.data['date'] == target_date, location]
-                    if len(actual_value) == 0: continue
+                    if len(actual_value) == 0:
+                        continue
                     actual_value = actual_value.iloc[0]
-                    
+
                     # Get predictions
                     X_pred_last = X_pred_transformed[-1:]
-                    
-                    # Get μ prediction
-                    mu_pred = temp_stage1.predict(X_pred_last)[0]
-                    
-                    # Inverse transform μ if using log
-                    if use_log_transform.get(location, False):
-                        mu_pred = np.expm1(mu_pred)
-                    
-                    # APPLY BIAS CORRECTION
-                    mu_pred_corrected = max(0.0, mu_pred + median_bias)
 
-                    # Get σ prediction
-                    dist_params = temp_stage2.predict(X_pred_last, pred_type="parameters")
-                    if hasattr(dist_params, 'values'):
-                        dist_params = dist_params.values
-                    
-                    if dist_params.ndim > 1:
-                        sigma_pred = dist_params[0, 1]
-                    else:
-                        sigma_pred = dist_params[1]
-                    
-                    sigma_pred = max(sigma_pred, 1e-6)
-                    
-                    # Scale sigma if using log transform
+                    # Get μ prediction (in transformed space if log transform used)
+                    mu_pred_raw = temp_stage1.predict(X_pred_last)[0]
+
+                    # Convert mu to linear space for reporting and residual calculation
                     if use_log_transform.get(location, False):
-                        sigma_pred = sigma_pred * mu_pred_corrected
-                    
-                    # Generate quantile forecasts
+                        mu_pred = np.expm1(mu_pred_raw)
+                    else:
+                        mu_pred = mu_pred_raw
+                    mu_pred_corrected = max(0.0, mu_pred)
+
+                    # --- CONFORMAL RESIDUAL QUANTILES ---
+                    # Generate quantiles using empirical residuals on log1p scale
                     from scipy.stats import norm
-                    quantile_forecasts = []
-                    for q in self.quantiles:
-                        pred = norm.ppf(q, loc=mu_pred_corrected, scale=sigma_pred)
-                        quantile_forecasts.append(max(pred, 0.0))
-                    
+
+                    if len(residuals_log) >= MIN_RESIDUALS_FOR_CONFORMAL:
+                        # Use conformal residual quantiles
+                        mu_log = np.log1p(max(mu_pred_corrected, 0.0))
+                        residual_quantiles = np.percentile(residuals_log, self.quantiles * 100)
+                        q_log = mu_log + residual_quantiles
+                        quantile_forecasts = [max(0.0, np.expm1(val)) for val in q_log]
+                    else:
+                        # Fallback to Stage-2 sigma with conservative cap
+                        dist_params = temp_stage2.predict(X_pred_last, pred_type="parameters")
+                        if hasattr(dist_params, 'values'):
+                            dist_params = dist_params.values
+
+                        if dist_params.ndim > 1:
+                            sigma_pred = dist_params[0, 1]
+                        else:
+                            sigma_pred = dist_params[1]
+
+                        sigma_pred = max(sigma_pred, 1e-6)
+
+                        # Cap sigma conservatively until we have enough residuals
+                        sigma_cap = max(1.0 * abs(mu_pred_corrected), 50.0)
+                        sigma_pred = min(sigma_pred, sigma_cap)
+
+                        quantile_forecasts = []
+                        for q in self.quantiles:
+                            pred = norm.ppf(q, loc=mu_pred_corrected, scale=sigma_pred)
+                            quantile_forecasts.append(max(pred, 0.0))
+
+                    # --- RECORD RESIDUAL FOR FUTURE FORECASTS ---
+                    # Compute residual in log1p space: log1p(actual) - log1p(mu_pred)
+                    residual_log = np.log1p(max(actual_value, 0.0)) - np.log1p(max(mu_pred_corrected, 0.0))
+                    residuals_log.append(residual_log)
+
+                    # Maintain rolling window
+                    if len(residuals_log) > RESIDUAL_LOOKBACK:
+                        residuals_log.pop(0)
+
                     forecast_results.append({
                         'forecast_date': val_date,
                         'target_date': target_date,
                         'actual_value': actual_value,
                         'quantile_forecasts': np.array(quantile_forecasts),
-                        'bias_applied': median_bias,
-                        'mu_uncorrected': mu_pred
+                        'mu_pred': mu_pred_corrected,
+                        'n_residuals': len(residuals_log)
                     })
-                        
+
                 except Exception as e:
                     print(f"      [ERROR] {location} @ {val_date.date()}: {str(e)}")
                     continue
-                    
+
             all_forecasts[location] = forecast_results
-            print(f"    Generated {len(forecast_results)} forecasts")
-            
+            print(f"    Generated {len(forecast_results)} forecasts (conformal after {MIN_RESIDUALS_FOR_CONFORMAL} residuals)")
+
         return all_forecasts
         
     def generate_persistence_forecasts(self, locations: List[str], horizon: int) -> Dict:

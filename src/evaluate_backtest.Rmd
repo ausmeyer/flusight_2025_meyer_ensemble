@@ -1,0 +1,324 @@
+---
+title: "Backtest Evaluation: Adaptive Ensemble vs Base Models"
+subtitle: "Evaluation of Linear Pooling Ensemble (Backtest Loop)"
+author: "Pipeline Evaluation"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    code_folding: hide
+    fig_width: 14
+    fig_height: 8
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 14,
+  fig.height = 8
+)
+
+library(dplyr)
+library(readr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(DT)
+```
+
+Generated on: `r Sys.time()`
+
+# Overview
+
+This report evaluates the performance of the **Adaptive Ensemble** generated via the retrospective backtest loop (Linear Pooling) against the retrospective base models and the FluSight baseline.
+
+**Evaluation Period:** From `2024-10-01` to present (based on available backtest files).
+
+```{r load-data}
+# 1. Load Actuals (Truth Data)
+latest_file <- function(dir, pattern) {
+  files <- list.files(dir, pattern = pattern, full.names = TRUE)
+  if (length(files) == 0) return(NA_character_)
+  files[order(files)][length(files)]
+}
+
+# Determine root path prefix based on where script is running
+if (dir.exists('../data/imputed_sets')) {
+  root_prefix <- '..'
+} else if (dir.exists('data/imputed_sets')) {
+  root_prefix <- '.'
+} else {
+  stop("Could not locate data/imputed_sets/ directory relative to current WD: ", getwd())
+}
+
+data_dir <- file.path(root_prefix, 'data/imputed_sets')
+actual_path <- latest_file(data_dir, '^imputed_and_stitched_hosp_.*\\.csv$')
+
+if(is.na(actual_path)) stop("No stitched data found in ", data_dir)
+actual_raw <- read_csv(actual_path, show_col_types = FALSE)
+
+# Map location_name -> FIPS
+location_to_fips <- c(
+  'Alabama'='01','Alaska'='02','Arizona'='04','Arkansas'='05','California'='06','Colorado'='08','Connecticut'='09','Delaware'='10',
+  'District of Columbia'='11','Florida'='12','Georgia'='13','Hawaii'='15','Idaho'='16','Illinois'='17','Indiana'='18','Iowa'='19',
+  'Kansas'='20','Kentucky'='21','Louisiana'='22','Maine'='23','Maryland'='24','Massachusetts'='25','Michigan'='26','Minnesota'='27',
+  'Mississippi'='28','Missouri'='29','Montana'='30','Nebraska'='31','Nevada'='32','New Hampshire'='33','New Jersey'='34','New Mexico'='35',
+  'New York'='36','North Carolina'='37','North Dakota'='38','Ohio'='39','Oklahoma'='40','Oregon'='41','Pennsylvania'='42','Puerto Rico'='72',
+  'Rhode Island'='44','South Carolina'='45','South Dakota'='46','Tennessee'='47','Texas'='48','Utah'='49','Vermont'='50','Virginia'='51',
+  'Washington'='53','West Virginia'='54','Wisconsin'='55','Wyoming'='56','US'='US'
+)
+
+actual_data <- actual_raw %>%
+  transmute(location = location_to_fips[location_name], date = as.Date(date), actual_value = total_hosp) %>%
+  filter(!is.na(location), !is.na(actual_value))
+
+# 2. Load Forecasts
+
+# Helper to load standard CSVs
+load_forecast_csv <- function(path, model_name, horizon=NULL) {
+  if (!file.exists(path)) return(NULL)
+  df <- read_csv(path, show_col_types = FALSE) %>%
+    mutate(
+      model = model_name,
+      reference_date = as.Date(reference_date),
+      target_end_date = as.Date(target_end_date),
+      location = as.character(location),
+      output_type_id = as.numeric(output_type_id),
+      value = as.numeric(value)
+    ) %>%
+    filter(output_type == 'quantile')
+  
+  # Standardize horizon if missing or inconsistent
+  if (!is.null(horizon)) {
+    df$horizon <- horizon
+  } else if (!'horizon' %in% names(df)) {
+    # Try to infer from filename or data structure (fallback)
+    # Ideally should be passed in.
+    df$horizon <- NA_integer_ 
+  }
+  
+  # Ensure horizon is 1-based (1,2,3,4) for grouping
+  # Some files might use 0-based (0,1,2,3).
+  # Check unique values
+  u_h <- unique(df$horizon)
+  if (all(u_h %in% c(0,1,2,3))) {
+    df$horizon <- df$horizon + 1
+  }
+  
+  df %>%
+    select(model, reference_date, horizon, target_end_date, location, output_type_id, value)
+}
+
+all_forecasts_list <- list()
+
+# A. Load Base Models (Retrospective)
+# These are stored by horizon
+for (h in 1:4) {
+  # Baseline
+  path <- sprintf('../forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', h)
+  all_forecasts_list[[paste0('Base_h',h)]] <- load_forecast_csv(path, 'FluSight-baseline', h)
+  
+  # ARIMA
+  path <- sprintf('%s/forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv', root_prefix, h)
+  all_forecasts_list[[paste0('ARIMA_h',h)]] <- load_forecast_csv(path, 'ARIMA', h)
+  
+  # LGBM t100
+  path <- sprintf('%s/forecasts/retrospective/lgbm_enhanced_t100/TwoStage-FrozenMu_h%d_forecasts.csv', root_prefix, h)
+  all_forecasts_list[[paste0('LGBMt100_h',h)]] <- load_forecast_csv(path, 'LGBM-t100', h)
+
+  # LGBM t10
+  path <- sprintf('%s/forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h%d_forecasts.csv', root_prefix, h)
+  all_forecasts_list[[paste0('LGBMt10_h',h)]] <- load_forecast_csv(path, 'LGBM-t10', h)
+  
+  # SVM
+  # SVM files are named svm_retrospective_h{h}.csv
+  path <- sprintf('%s/forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', root_prefix, h)
+  all_forecasts_list[[paste0('SVM_h',h)]] <- load_forecast_csv(path, 'SVM', h)
+}
+
+# B. Load Adaptive Ensemble Backtest (Linear Pooling)
+# These files are one per DATE, containing ALL horizons.
+# forecasts/retrospective/ensemble/AdaptiveEnsemble_retrospective_YYYYMMDD.csv
+ens_files <- list.files(file.path(root_prefix, 'forecasts/retrospective/ensemble'), pattern = 'AdaptiveEnsemble_retrospective_.*\\.csv', full.names = TRUE)
+
+if (length(ens_files) > 0) {
+  ens_list <- lapply(ens_files, function(fp) load_forecast_csv(fp, 'AdaptiveEnsemble'))
+  ens_df <- bind_rows(ens_list)
+  # Ensure horizon is handled (AdaptiveEnsemble outputs usually have 0-based horizons in column)
+  # load_forecast_csv attempts to fix this, but let's double check
+  # If max horizon is 3, it's 0-based.
+  if (max(ens_df$horizon, na.rm=TRUE) == 3) {
+     ens_df$horizon <- ens_df$horizon + 1
+  }
+  all_forecasts_list[['Ensemble']] <- ens_df
+}
+
+# Combine all
+forecasts_all <- bind_rows(all_forecasts_list) %>%
+  filter(!is.na(value))
+
+```
+
+# Scoring (Weighted Interval Score)
+
+```{r scoring}
+# WIS function (log scale)
+calculate_wis_single <- function(qvals, qlevels, actual_value){
+  qv <- as.numeric(qvals)
+  ql <- as.numeric(qlevels)
+  # Log scale transform for score calculation (CDC methodology)
+  alog <- log(as.numeric(actual_value) + 1)
+  
+  if (!is.finite(alog)) return(NA_real_)
+  
+  keep <- is.finite(qv) & is.finite(ql)
+  qv <- qv[keep]; ql <- ql[keep]
+  if (length(qv) == 0 || length(ql) == 0) return(NA_real_)
+  
+  alphas <- unique(c(ql[ql <= 0.5], 1 - ql[ql > 0.5]))
+  alphas <- alphas[is.finite(alphas) & alphas > 0]
+  if (length(alphas) == 0) return(NA_real_)
+  
+  # Log transform forecasts
+  qlog <- log(pmax(qv, 0) + 1)
+  
+  scores <- sapply(alphas, function(a){
+    li <- suppressWarnings(which.min(abs(ql - a)))
+    ui <- suppressWarnings(which.min(abs(ql - (1 - a))))
+    if (length(li) == 0 || length(ui) == 0 || is.na(li) || is.na(ui)) return(NA_real_)
+    L <- qlog[li]; U <- qlog[ui]
+    if (!is.finite(L) || !is.finite(U)) return(NA_real_)
+    
+    width <- U - L
+    pen <- if (is.finite(alog) && alog < L) (2/a) * (L - alog) else if (is.finite(alog) && alog > U) (2/a) * (alog - U) else 0
+    if (is.finite(width) && is.finite(pen)) width + pen else NA_real_
+  })
+  
+  if (all(is.na(scores))) NA_real_ else mean(scores, na.rm = TRUE)
+}
+
+# Calculate Scores
+# Group by unique forecast instance (Model, Horizon, Date, Location)
+scores_df <- forecasts_all %>%
+  group_by(model, horizon, reference_date, target_end_date, location) %>%
+  summarise(
+    quantile_values = list(value), 
+    quantile_levels = list(output_type_id), 
+    .groups = 'drop'
+  ) %>%
+  inner_join(actual_data, by = c('target_end_date' = 'date', 'location')) %>%
+  rowwise() %>%
+  mutate(wis = calculate_wis_single(unlist(quantile_values), unlist(quantile_levels), actual_value)) %>%
+  ungroup() %>%
+  filter(!is.na(wis)) %>%
+  # Exclude US and PR for aggregate summaries usually
+  filter(!location %in% c('US', '72')) 
+
+# Restrict to Common Set for Fair Comparison
+# We want to compare models only on (Location, Date, Horizon) tuples where ALL models are present.
+# Specifically, we care about comparing AdaptiveEnsemble vs Baseline vs Best Base Model.
+
+# 1. Identify common tuples between AdaptiveEnsemble and Baseline
+# (Base models might have different availability, but usually Baseline matches Ensemble)
+common_set <- scores_df %>%
+  select(model, horizon, target_end_date, location) %>%
+  distinct() %>%
+  mutate(present = 1) %>%
+  pivot_wider(names_from = model, values_from = present) %>%
+  filter(!is.na(`AdaptiveEnsemble`) & !is.na(`FluSight-baseline`)) %>%
+  select(horizon, target_end_date, location) # Unique keys
+
+scores_common <- scores_df %>%
+  inner_join(common_set, by = c("horizon", "target_end_date", "location"))
+
+```
+
+# Results
+
+## 1. Geometric Mean WIS (Per Horizon)
+
+Lower is better. "Relative WIS" is Ratio to Baseline ( < 1.0 is better than baseline).
+
+```{r summary-horizon}
+summary_horizon <- scores_common %>%
+  group_by(horizon, model, location) %>%
+  # 1. Mean WIS per location (arithmetic)
+  summarise(mean_wis_loc = mean(wis), .groups='drop') %>%
+  group_by(horizon, model) %>%
+  # 2. Geometric Mean across locations
+  summarise(geo_mean_wis = exp(mean(log(mean_wis_loc))), .groups='drop') %>%
+  group_by(horizon) %>%
+  mutate(
+    baseline_score = geo_mean_wis[model == "FluSight-baseline"],
+    rel_wis = geo_mean_wis / baseline_score
+  ) %>%
+  ungroup() %>%
+  arrange(horizon, rel_wis)
+
+datatable(summary_horizon %>% mutate(across(where(is.numeric), round, 3)), 
+          options = list(pageLength = 20))
+```
+
+## 2. Geometric Mean WIS (Combined Horizons)
+
+Aggregated across all 4 horizons.
+
+```{r summary-combined}
+summary_combined <- scores_common %>%
+  group_by(model, location) %>%
+  summarise(mean_wis_loc = mean(wis), .groups='drop') %>%
+  group_by(model) %>%
+  summarise(geo_mean_wis = exp(mean(log(mean_wis_loc))), .groups='drop') %>%
+  mutate(
+    baseline_score = geo_mean_wis[model == "FluSight-baseline"],
+    rel_wis = geo_mean_wis / baseline_score
+  ) %>%
+  arrange(rel_wis)
+
+datatable(summary_combined %>% mutate(across(where(is.numeric), round, 3)))
+```
+
+## 3. Performance Over Time
+
+Average WIS (across locations) by target date.
+
+```{r time-plot}
+time_scores <- scores_common %>%
+  group_by(target_end_date, model) %>%
+  summarise(mean_wis = mean(wis), .groups='drop')
+
+ggplot(time_scores, aes(x=target_end_date, y=mean_wis, color=model)) +
+  geom_line(size=1) +
+  geom_point() +
+  scale_y_log10() +
+  labs(title="Average WIS over Time (Log Scale)", y="Mean WIS", x="Target Date") +
+  theme_minimal()
+```
+
+## 4. Head-to-Head: Ensemble vs Baseline
+
+Percentage of (Location, Week, Horizon) instances where Ensemble beat Baseline.
+
+```{r head-to-head}
+comparison <- scores_common %>%
+  select(horizon, target_end_date, location, model, wis) %>%
+  filter(model %in% c("AdaptiveEnsemble", "FluSight-baseline")) %>%
+  pivot_wider(names_from = model, values_from = wis, values_fn = mean) %>%
+  mutate(
+    Ensemble_Better = `AdaptiveEnsemble` < `FluSight-baseline`
+  )
+
+win_rate <- comparison %>%
+  group_by(horizon) %>%
+  summarise(
+    n = n(),
+    win_pct = mean(Ensemble_Better) * 100
+  )
+
+kable(win_rate, digits=1, caption="Ensemble Win Rate vs Baseline (%)")
+```
+

@@ -280,9 +280,9 @@ class ARIMAForecaster:
             for i in range(min(len(test_series), 30)):  # Limit to 30 weeks for speed
                 # Expanding window: include all previous data
                 if i == 0:
-                    train_data = full_train
+                    train_data = pd.concat([full_train, test_series.iloc[:1]])
                 else:
-                    train_data = pd.concat([full_train, test_series.iloc[:i]])
+                    train_data = pd.concat([full_train, test_series.iloc[:i+1]])
                 
                 forecast_date = test_series.index[i]
                 

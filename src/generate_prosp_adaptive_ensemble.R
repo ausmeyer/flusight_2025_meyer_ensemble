@@ -178,10 +178,12 @@ calculate_linear_pool <- function(df_subset, weights, target_taus) {
     
     # Extract this model's quantiles
     m_data <- df_subset %>% 
-      filter(source_model == m) %>%
+      filter(source_model == m, !is.na(value)) %>%
       arrange(output_type_id)
     
-    if(nrow(m_data) < 2) next # Need at least 2 points to interpolate
+    # Need at least 2 distinct non-NA values to interpolate
+    # If all values are identical (point mass), approx fails (nx=1)
+    if(nrow(m_data) < 2 || length(unique(m_data$value)) < 2) next 
     
     # Create CDF approximation for this model: P(Y <= y)
     # We map Values (x) -> Quantiles (y)

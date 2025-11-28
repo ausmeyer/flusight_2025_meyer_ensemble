@@ -1,6 +1,6 @@
 ---
 title: "Retrospective WIS Evaluation (Pipeline Outputs)"
-subtitle: "Per-horizon and combined WIS and relative WIS since 2025-10-01"
+subtitle: "Per-horizon and combined WIS and relative WIS since 2024-10-01"
 author: "Pipeline Evaluation"
 date: "`r Sys.Date()`"
 output:
@@ -34,7 +34,7 @@ Generated on: `r Sys.time()`
 # Retrospective WIS Evaluation (Pipeline Outputs)
 
 ```{r pipeline-wis}
-EVAL_START <- as.Date('2025-10-01')
+EVAL_START <- as.Date('2024-10-01')
 
 # Helper: latest file in a directory by pattern
 latest_file <- function(dir, pattern) {
@@ -222,6 +222,14 @@ for (hh in sort(unique(wis_scores_all_df$h))) {
 
 wis_scores_common <- bind_rows(wis_common_list)
 
+cat("\nDEBUG INFO:\n")
+cat("EVAL_START:", as.character(EVAL_START), "\n")
+cat("Available dates per model (min/max):\n")
+print(wis_scores_all_df %>% group_by(model) %>% summarise(start=min(target_end_date), end=max(target_end_date), n=n()))
+cat("Common evaluation set date range:\n")
+print(wis_scores_common %>% summarise(start=min(target_end_date), end=max(target_end_date), n_dates=n_distinct(target_end_date)))
+cat("\n")
+
 # Per-horizon geometric mean WIS and relative WIS
 wis_by_model <- wis_scores_common %>%
   group_by(h, model, location) %>%
@@ -239,7 +247,7 @@ per_horizon_summary <- wis_by_model %>%
   ungroup() %>%
   arrange(h, is.na(relative_wis), relative_wis)
 
-cat("\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (>= 2025-10-01):\n\n")
+cat("\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (>= 2024-10-01):\n\n")
 print(knitr::kable(per_horizon_summary, digits = 4))
 
 # Combined across horizons
@@ -257,6 +265,6 @@ combined_summary <- combined_by_model %>%
   select(-baseline_gmw) %>%
   arrange(is.na(relative_wis), relative_wis)
 
-cat("\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (All horizons, >= 2025-10-01):\n\n")
+cat("\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (All horizons, >= 2024-10-01):\n\n")
 print(knitr::kable(combined_summary, digits = 4))
 ```
