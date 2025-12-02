@@ -49,6 +49,7 @@ echo "Retrospective Start Date (Cutoff): $CUTOFF"
 mkdir -p forecasts/retrospective/arima
 mkdir -p forecasts/retrospective/lgbm_enhanced_t100
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10
+mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded
 mkdir -p forecasts/retrospective/svm_t100
 mkdir -p forecasts/retrospective/ensemble
 mkdir -p forecasts/prospective # Ensure exists for temp files
@@ -67,6 +68,11 @@ python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF
 echo "--> LGBM (t10)"
 python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
   --models-dir models/lgbm_enhanced_t10 --models-base-dir models/lgbm_enhanced_t10 \
+  --output-base forecasts/retrospective
+
+echo "--> LGBM (t100 bounded)"
+python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
+  --models-dir models/lgbm_enhanced_t10_bounded --models-base-dir models/lgbm_enhanced_t10_bounded \
   --output-base forecasts/retrospective
 
 echo "--> SVM"
@@ -141,6 +147,10 @@ for h in h_list:
     tasks.append({
         'src': f'forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h{h}_forecasts.csv',
         'dst': f'forecasts/prospective/TwoStage-FrozenMu-t10_h{h}_prospective_{ts}.csv'
+    })
+    tasks.append({
+        'src': f'forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h{h}_forecasts.csv',
+        'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded_h{h}_prospective_{ts}.csv'
     })
 
 files_created = 0

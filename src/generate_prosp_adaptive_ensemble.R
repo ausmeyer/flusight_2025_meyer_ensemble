@@ -10,11 +10,12 @@ suppressPackageStartupMessages({
 
 # CLI args
 args <- commandArgs(trailingOnly = TRUE)
-LOOKBACK_WEEKS <- 4
+LOOKBACK_WEEKS <- 6
 HISTORY_WEEKS  <- 8
 INCLUDE_ARIMA <- TRUE
 INCLUDE_SVM   <- TRUE
 INCLUDE_LGBM  <- TRUE
+INCLUDE_LGBM_BOUNDED <- TRUE
 AS_OF_OVERRIDE <- NA_character_
 
 i <- 1
@@ -26,6 +27,7 @@ while (i <= length(args)) {
   if (key == '--include-arima')  { INCLUDE_ARIMA  <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--include-svm')    { INCLUDE_SVM    <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--include-lgbm')   { INCLUDE_LGBM   <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
+  if (key == '--include-lgbm-bounded') { INCLUDE_LGBM_BOUNDED <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--asof-date')      { AS_OF_OVERRIDE <- val; i <- i + 2; next }
   i <- i + 1
 }
@@ -224,7 +226,7 @@ calculate_linear_pool <- function(df_subset, weights, target_taus) {
 }
 
 # REPLACEMENT FUNCTION: compute_weights (EWMA Version)
-compute_weights <- function(model_dfs, horizon, as_of_date, lookback_weeks = 4, history_weeks = 8) {
+compute_weights <- function(model_dfs, horizon, as_of_date, lookback_weeks = 6, history_weeks = 8) {
   
   # 1. Identify all available reference dates from the history files
   all_refs <- unique(do.call(c, lapply(model_dfs, function(x) unique(as.Date(x$reference_date)))))
@@ -326,6 +328,7 @@ load_retro_for_h <- function(h) {
   arima_path <- file.path('forecasts/retrospective/arima', sprintf('ARIMA_h%d_forecasts.csv', h))
   lgbm_t100_path <- file.path('forecasts/retrospective/lgbm_enhanced_t100', sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
   lgbm_t10_path  <- file.path('forecasts/retrospective/lgbm_enhanced_t10',  sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
+  lgbm_bounded_path <- file.path('forecasts/retrospective/lgbm_enhanced_t10_bounded', sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
   svm_glob   <- list.files('forecasts/retrospective/svm_t100', pattern = sprintf('^svm.*_h%d.*\\.csv$', h), full.names = TRUE, ignore.case = TRUE)
 
   if (INCLUDE_ARIMA && file.exists(arima_path)) {
@@ -336,6 +339,9 @@ load_retro_for_h <- function(h) {
   }
   if (INCLUDE_LGBM && file.exists(lgbm_t10_path)) {
     lst$LGBM_t10 <- read_csv(lgbm_t10_path, show_col_types = FALSE)
+  }
+  if (INCLUDE_LGBM_BOUNDED && file.exists(lgbm_bounded_path)) {
+    lst$LGBM_bounded <- read_csv(lgbm_bounded_path, show_col_types = FALSE)
   }
   if (INCLUDE_SVM && length(svm_glob) > 0) {
     # prefer a single main SVM file; otherwise combine
@@ -358,10 +364,11 @@ load_prosp_for_h <- function(h, ts) {
   if (file.exists(arima_fp)) lst$ARIMA <- read_csv(arima_fp, show_col_types = FALSE)
   if (file.exists(svm_fp))   lst$SVM   <- read_csv(svm_fp, show_col_types = FALSE)
 
-  # LGBM variants: TwoStage-FrozenMu*, distinguish t100 vs t10 by filename
+  # LGBM variants: TwoStage-FrozenMu*, distinguish bounded vs t100 vs t10 by filename
   lgbm_files <- list.files(pdir, pattern = sprintf('^TwoStage-FrozenMu.*_h%d_prospective_%s\\.csv$', h, ts), full.names = TRUE)
   for (fp in lgbm_files) {
-    key <- if (grepl('t100', basename(fp), ignore.case = TRUE)) 'LGBM_t100'
+    key <- if (grepl('bounded', basename(fp), ignore.case = TRUE)) 'LGBM_bounded'
+           else if (grepl('t100', basename(fp), ignore.case = TRUE)) 'LGBM_t100'
            else if (grepl('t10', basename(fp), ignore.case = TRUE)) 'LGBM_t10'
            else 'LGBM'
     lst[[key]] <- read_csv(fp, show_col_types = FALSE)

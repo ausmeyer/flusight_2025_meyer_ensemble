@@ -94,19 +94,18 @@ load_forecast_csv <- function(path, model_name, horizon=NULL) {
   
   # Standardize horizon if missing or inconsistent
   if (!is.null(horizon)) {
+    # Horizon passed explicitly - use it directly (already 1-based)
     df$horizon <- horizon
   } else if (!'horizon' %in% names(df)) {
     # Try to infer from filename or data structure (fallback)
     # Ideally should be passed in.
-    df$horizon <- NA_integer_ 
-  }
-  
-  # Ensure horizon is 1-based (1,2,3,4) for grouping
-  # Some files might use 0-based (0,1,2,3).
-  # Check unique values
-  u_h <- unique(df$horizon)
-  if (all(u_h %in% c(0,1,2,3))) {
-    df$horizon <- df$horizon + 1
+    df$horizon <- NA_integer_
+  } else {
+    # Horizon exists in file - check if 0-based and convert
+    # Only convert if max horizon is 3 (indicating 0-based: 0,1,2,3)
+    if (max(df$horizon, na.rm = TRUE) == 3) {
+      df$horizon <- df$horizon + 1
+    }
   }
   
   df %>%
@@ -119,7 +118,7 @@ all_forecasts_list <- list()
 # These are stored by horizon
 for (h in 1:4) {
   # Baseline
-  path <- sprintf('../forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', h)
+  path <- sprintf('%s/forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', root_prefix, h)
   all_forecasts_list[[paste0('Base_h',h)]] <- load_forecast_csv(path, 'FluSight-baseline', h)
   
   # ARIMA
@@ -133,7 +132,11 @@ for (h in 1:4) {
   # LGBM t10
   path <- sprintf('%s/forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h%d_forecasts.csv', root_prefix, h)
   all_forecasts_list[[paste0('LGBMt10_h',h)]] <- load_forecast_csv(path, 'LGBM-t10', h)
-  
+
+  # LGBM bounded
+  path <- sprintf('%s/forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h%d_forecasts.csv', root_prefix, h)
+  all_forecasts_list[[paste0('LGBMbounded_h',h)]] <- load_forecast_csv(path, 'LGBM-bounded', h)
+
   # SVM
   # SVM files are named svm_retrospective_h{h}.csv
   path <- sprintf('%s/forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', root_prefix, h)

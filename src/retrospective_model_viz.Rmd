@@ -1,0 +1,476 @@
+---
+title: "Retrospective Model Visualization"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+    theme: flatly
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tidyr)
+library(shiny)
+
+# Determine root path prefix
+if (dir.exists('../data/imputed_sets')) {
+  root_prefix <- '..'
+} else if (dir.exists('data/imputed_sets')) {
+  root_prefix <- '.'
+} else {
+  stop("Could not locate data/imputed_sets/ directory")
+}
+
+# Helper: latest file by pattern
+latest_file <- function(dir, pattern) {
+  files <- list.files(dir, pattern = pattern, full.names = TRUE)
+  if (length(files) == 0) return(NA_character_)
+  files[order(files)][length(files)]
+}
+
+# Load ground truth
+data_dir <- file.path(root_prefix, 'data/imputed_sets')
+actual_path <- latest_file(data_dir, '^imputed_and_stitched_hosp_.*\\.csv$')
+actual_raw <- read_csv(actual_path, show_col_types = FALSE)
+
+# FIPS mappings
+location_to_fips <- c(
+  'Alabama'='01','Alaska'='02','Arizona'='04','Arkansas'='05','California'='06','Colorado'='08',
+
+  'Connecticut'='09','Delaware'='10','District of Columbia'='11','Florida'='12','Georgia'='13',
+  'Hawaii'='15','Idaho'='16','Illinois'='17','Indiana'='18','Iowa'='19','Kansas'='20',
+  'Kentucky'='21','Louisiana'='22','Maine'='23','Maryland'='24','Massachusetts'='25',
+  'Michigan'='26','Minnesota'='27','Mississippi'='28','Missouri'='29','Montana'='30',
+  'Nebraska'='31','Nevada'='32','New Hampshire'='33','New Jersey'='34','New Mexico'='35',
+  'New York'='36','North Carolina'='37','North Dakota'='38','Ohio'='39','Oklahoma'='40',
+  'Oregon'='41','Pennsylvania'='42','Puerto Rico'='72','Rhode Island'='44','South Carolina'='45',
+  'South Dakota'='46','Tennessee'='47','Texas'='48','Utah'='49','Vermont'='50','Virginia'='51',
+  'Washington'='53','West Virginia'='54','Wisconsin'='55','Wyoming'='56','US'='US'
+)
+fips_to_name <- setNames(names(location_to_fips), location_to_fips)
+
+# Prepare ground truth
+actual_data <- actual_raw %>%
+  transmute(
+    location = location_to_fips[location_name],
+    location_name = location_name,
+    date = as.Date(date),
+    actual_value = total_hosp
+  ) %>%
+  filter(!is.na(location), !is.na(actual_value), date >= as.Date('2024-10-01'))
+
+# Helper to load forecast CSV
+load_forecast_quantiles <- function(path, model_name, file_horizon) {
+  if (!file.exists(path)) return(NULL)
+  df <- read_csv(path, show_col_types = FALSE) %>%
+    filter(output_type == 'quantile') %>%
+    mutate(
+      model = model_name,
+      reference_date = as.Date(reference_date),
+      target_end_date = as.Date(target_end_date),
+      location = as.character(location),
+      output_type_id = as.numeric(output_type_id),
+      value = as.numeric(value),
+      horizon = file_horizon
+    ) %>%
+    select(model, reference_date, horizon, target_end_date, location, output_type_id, value)
+}
+
+# Load all retrospective forecasts
+all_forecasts <- list()
+
+for (h in 1:4) {
+  path <- file.path(root_prefix, sprintf('forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', h))
+  all_forecasts[[paste0('Baseline_h', h)]] <- load_forecast_quantiles(path, 'FluSight-baseline', h)
+
+  path <- file.path(root_prefix, sprintf('forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv', h))
+  all_forecasts[[paste0('ARIMA_h', h)]] <- load_forecast_quantiles(path, 'ARIMA', h)
+
+  path <- file.path(root_prefix, sprintf('forecasts/retrospective/lgbm_enhanced_t100/TwoStage-FrozenMu_h%d_forecasts.csv', h))
+  all_forecasts[[paste0('LGBM_t100_h', h)]] <- load_forecast_quantiles(path, 'LGBM-t100', h)
+
+  path <- file.path(root_prefix, sprintf('forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h%d_forecasts.csv', h))
+  all_forecasts[[paste0('LGBM_t10_h', h)]] <- load_forecast_quantiles(path, 'LGBM-t10', h)
+
+  path <- file.path(root_prefix, sprintf('forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h%d_forecasts.csv', h))
+  all_forecasts[[paste0('LGBM_bounded_h', h)]] <- load_forecast_quantiles(path, 'LGBM-bounded', h)
+
+  path <- file.path(root_prefix, sprintf('forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', h))
+  all_forecasts[[paste0('SVM_h', h)]] <- load_forecast_quantiles(path, 'SVM', h)
+}
+
+# Adaptive Ensemble
+ens_files <- list.files(
+  file.path(root_prefix, 'forecasts/retrospective/ensemble'),
+  pattern = 'AdaptiveEnsemble_retrospective_.*\\.csv',
+  full.names = TRUE
+)
+
+if (length(ens_files) > 0) {
+  ens_list <- lapply(ens_files, function(fp) {
+    read_csv(fp, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble',
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, reference_date, horizon, target_end_date, location, output_type_id, value)
+  })
+  all_forecasts[['Ensemble']] <- bind_rows(ens_list)
+}
+
+# Combine and summarize
+forecasts_all <- bind_rows(all_forecasts) %>%
+  filter(!is.na(value), target_end_date >= as.Date('2024-10-01'))
+
+forecast_summary <- forecasts_all %>%
+  group_by(model, horizon, reference_date, target_end_date, location) %>%
+  summarise(
+    q025 = value[which.min(abs(output_type_id - 0.025))],
+    q25 = value[which.min(abs(output_type_id - 0.25))],
+    median = value[which.min(abs(output_type_id - 0.5))],
+    q75 = value[which.min(abs(output_type_id - 0.75))],
+    q975 = value[which.min(abs(output_type_id - 0.975))],
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    q025 = pmin(q025, q25, median, na.rm = TRUE),
+    q25 = pmin(q25, median, na.rm = TRUE),
+    q75 = pmax(q75, median, na.rm = TRUE),
+    q975 = pmax(q975, q75, median, na.rm = TRUE),
+    location_name = fips_to_name[location]
+  ) %>%
+  filter(!is.na(location_name))
+
+# Available models
+all_models <- sort(unique(forecast_summary$model))
+
+# Model colors
+model_colors <- c(
+  "AdaptiveEnsemble" = "#cc5200",
+  "FluSight-baseline" = "#555555",
+  "ARIMA" = "#1f77b4",
+  "SVM" = "#2ca02c",
+  "LGBM-t100" = "#9467bd",
+  "LGBM-t10" = "#8c564b",
+  "LGBM-bounded" = "#e377c2"
+)
+
+# Fill colors (lighter versions)
+model_fills <- c(
+  "AdaptiveEnsemble" = "#ff944d",
+  "FluSight-baseline" = "#999999",
+  "ARIMA" = "#7fbfff",
+  "SVM" = "#90ee90",
+  "LGBM-t100" = "#c9b3d9",
+  "LGBM-t10" = "#c4a484",
+  "LGBM-bounded" = "#f0b8d0"
+)
+```
+
+Sidebar {.sidebar}
+=====================================
+
+```{r}
+checkboxGroupInput(
+  "models",
+  "Select Models:",
+  choices = all_models,
+  selected = c("AdaptiveEnsemble", "FluSight-baseline")
+)
+
+hr()
+
+checkboxInput("show_95ci", "Show 95% CI", value = TRUE)
+checkboxInput("show_50ci", "Show 50% CI", value = TRUE)
+checkboxInput("show_median", "Show Median", value = TRUE)
+
+hr()
+
+p("Black line = Ground Truth")
+p("Generated:", Sys.Date())
+```
+
+Horizon 1
+=====================================
+
+Row {data-height=1000}
+-------------------------------------
+
+```{r}
+renderPlot({
+  req(input$models)
+
+  h_data <- forecast_summary %>%
+    filter(horizon == 1, model %in% input$models, !location %in% c('US', '72'))
+  actuals <- actual_data %>% filter(!location %in% c('US', '72'))
+
+  p <- ggplot() +
+    geom_line(data = actuals, aes(x = date, y = actual_value), color = 'black', linewidth = 0.5)
+
+  if (input$show_95ci && nrow(h_data) > 0) {
+    p <- p + geom_ribbon(
+      data = h_data,
+      aes(x = target_end_date, ymin = q025, ymax = q975, fill = model),
+      alpha = 0.2
+    )
+  }
+
+  if (input$show_50ci && nrow(h_data) > 0) {
+    p <- p + geom_ribbon(
+      data = h_data,
+      aes(x = target_end_date, ymin = q25, ymax = q75, fill = model),
+      alpha = 0.35
+    )
+  }
+
+  if (input$show_median && nrow(h_data) > 0) {
+    p <- p + geom_line(
+      data = h_data,
+      aes(x = target_end_date, y = median, color = model),
+      linewidth = 0.6
+    )
+  }
+
+  p + facet_wrap(~ location_name, scales = 'free_y', ncol = 6) +
+    scale_color_manual(values = model_colors, drop = TRUE) +
+    scale_fill_manual(values = model_fills, drop = TRUE) +
+    theme_bw(base_size = 10) +
+    theme(
+      legend.position = "bottom",
+      strip.text = element_text(size = 8),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+      axis.text.y = element_text(size = 7)
+    ) +
+    labs(title = "Horizon 1 (1-week ahead)", x = "Date", y = "Weekly Hospitalizations",
+         color = "Model", fill = "Model")
+}, height = 900)
+```
+
+Horizon 2
+=====================================
+
+Row {data-height=1000}
+-------------------------------------
+
+```{r}
+renderPlot({
+  req(input$models)
+
+  h_data <- forecast_summary %>%
+    filter(horizon == 2, model %in% input$models, !location %in% c('US', '72'))
+  actuals <- actual_data %>% filter(!location %in% c('US', '72'))
+
+  p <- ggplot() +
+    geom_line(data = actuals, aes(x = date, y = actual_value), color = 'black', linewidth = 0.5)
+
+  if (input$show_95ci && nrow(h_data) > 0) {
+    p <- p + geom_ribbon(
+      data = h_data,
+      aes(x = target_end_date, ymin = q025, ymax = q975, fill = model),
+      alpha = 0.2
+    )
+  }
+
+  if (input$show_50ci && nrow(h_data) > 0) {
+    p <- p + geom_ribbon(
+      data = h_data,
+      aes(x = target_end_date, ymin = q25, ymax = q75, fill = model),
+      alpha = 0.35
+    )
+  }
+
+  if (input$show_median && nrow(h_data) > 0) {
+    p <- p + geom_line(
+      data = h_data,
+      aes(x = target_end_date, y = median, color = model),
+      linewidth = 0.6
+    )
+  }
+
+  p + facet_wrap(~ location_name, scales = 'free_y', ncol = 6) +
+    scale_color_manual(values = model_colors, drop = TRUE) +
+    scale_fill_manual(values = model_fills, drop = TRUE) +
+    theme_bw(base_size = 10) +
+    theme(
+      legend.position = "bottom",
+      strip.text = element_text(size = 8),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+      axis.text.y = element_text(size = 7)
+    ) +
+    labs(title = "Horizon 2 (2-week ahead)", x = "Date", y = "Weekly Hospitalizations",
+         color = "Model", fill = "Model")
+}, height = 900)
+```
+
+Horizon 3
+=====================================
+
+Row {data-height=1000}
+-------------------------------------
+
+```{r}
+renderPlot({
+  req(input$models)
+
+  h_data <- forecast_summary %>%
+    filter(horizon == 3, model %in% input$models, !location %in% c('US', '72'))
+  actuals <- actual_data %>% filter(!location %in% c('US', '72'))
+
+  p <- ggplot() +
+    geom_line(data = actuals, aes(x = date, y = actual_value), color = 'black', linewidth = 0.5)
+
+  if (input$show_95ci && nrow(h_data) > 0) {
+    p <- p + geom_ribbon(
+      data = h_data,
+      aes(x = target_end_date, ymin = q025, ymax = q975, fill = model),
+      alpha = 0.2
+    )
+  }
+
+  if (input$show_50ci && nrow(h_data) > 0) {
+    p <- p + geom_ribbon(
+      data = h_data,
+      aes(x = target_end_date, ymin = q25, ymax = q75, fill = model),
+      alpha = 0.35
+    )
+  }
+
+  if (input$show_median && nrow(h_data) > 0) {
+    p <- p + geom_line(
+      data = h_data,
+      aes(x = target_end_date, y = median, color = model),
+      linewidth = 0.6
+    )
+  }
+
+  p + facet_wrap(~ location_name, scales = 'free_y', ncol = 6) +
+    scale_color_manual(values = model_colors, drop = TRUE) +
+    scale_fill_manual(values = model_fills, drop = TRUE) +
+    theme_bw(base_size = 10) +
+    theme(
+      legend.position = "bottom",
+      strip.text = element_text(size = 8),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+      axis.text.y = element_text(size = 7)
+    ) +
+    labs(title = "Horizon 3 (3-week ahead)", x = "Date", y = "Weekly Hospitalizations",
+         color = "Model", fill = "Model")
+}, height = 900)
+```
+
+Horizon 4
+=====================================
+
+Row {data-height=1000}
+-------------------------------------
+
+```{r}
+renderPlot({
+  req(input$models)
+
+  h_data <- forecast_summary %>%
+    filter(horizon == 4, model %in% input$models, !location %in% c('US', '72'))
+  actuals <- actual_data %>% filter(!location %in% c('US', '72'))
+
+  p <- ggplot() +
+    geom_line(data = actuals, aes(x = date, y = actual_value), color = 'black', linewidth = 0.5)
+
+  if (input$show_95ci && nrow(h_data) > 0) {
+    p <- p + geom_ribbon(
+      data = h_data,
+      aes(x = target_end_date, ymin = q025, ymax = q975, fill = model),
+      alpha = 0.2
+    )
+  }
+
+  if (input$show_50ci && nrow(h_data) > 0) {
+    p <- p + geom_ribbon(
+      data = h_data,
+      aes(x = target_end_date, ymin = q25, ymax = q75, fill = model),
+      alpha = 0.35
+    )
+  }
+
+  if (input$show_median && nrow(h_data) > 0) {
+    p <- p + geom_line(
+      data = h_data,
+      aes(x = target_end_date, y = median, color = model),
+      linewidth = 0.6
+    )
+  }
+
+  p + facet_wrap(~ location_name, scales = 'free_y', ncol = 6) +
+    scale_color_manual(values = model_colors, drop = TRUE) +
+    scale_fill_manual(values = model_fills, drop = TRUE) +
+    theme_bw(base_size = 10) +
+    theme(
+      legend.position = "bottom",
+      strip.text = element_text(size = 8),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+      axis.text.y = element_text(size = 7)
+    ) +
+    labs(title = "Horizon 4 (4-week ahead)", x = "Date", y = "Weekly Hospitalizations",
+         color = "Model", fill = "Model")
+}, height = 900)
+```
+
+US National
+=====================================
+
+Row {data-height=800}
+-------------------------------------
+
+```{r}
+renderPlot({
+  req(input$models)
+
+  h_data <- forecast_summary %>%
+    filter(location == 'US', model %in% input$models)
+  actuals <- actual_data %>% filter(location == 'US')
+
+  p <- ggplot() +
+    geom_line(data = actuals, aes(x = date, y = actual_value), color = 'black', linewidth = 0.7)
+
+  if (input$show_95ci && nrow(h_data) > 0) {
+    p <- p + geom_ribbon(
+      data = h_data,
+      aes(x = target_end_date, ymin = q025, ymax = q975, fill = model),
+      alpha = 0.2
+    )
+  }
+
+  if (input$show_50ci && nrow(h_data) > 0) {
+    p <- p + geom_ribbon(
+      data = h_data,
+      aes(x = target_end_date, ymin = q25, ymax = q75, fill = model),
+      alpha = 0.35
+    )
+  }
+
+  if (input$show_median && nrow(h_data) > 0) {
+    p <- p + geom_line(
+      data = h_data,
+      aes(x = target_end_date, y = median, color = model),
+      linewidth = 0.8
+    )
+  }
+
+  p + facet_wrap(~ horizon, ncol = 2, labeller = labeller(horizon = function(x) paste("Horizon", x))) +
+    scale_color_manual(values = model_colors, drop = TRUE) +
+    scale_fill_manual(values = model_fills, drop = TRUE) +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "bottom") +
+    labs(title = "US National Forecasts", x = "Date", y = "Weekly Hospitalizations",
+         color = "Model", fill = "Model")
+}, height = 700)
+```

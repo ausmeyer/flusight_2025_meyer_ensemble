@@ -3,11 +3,60 @@ Custom distributions for the two-stage frozen-μ pipeline.
 
 This module contains the GaussianFrozenLoc distribution which freezes
 the location parameter (μ) and only learns the scale parameter (σ).
+
+Also contains GaussianFrozenLocBounded which bounds sigma to [0.1, 0.6]
+for use with bounded-sigma mode.
 """
 
 import numpy as np
 from lightgbmlss.distributions.Gaussian import Gaussian
 from lightgbmlss.distributions.distribution_utils import DistributionClass
+
+
+def bounded_sigmoid_fn(x, min_val=0.1, max_val=0.6):
+    """
+    Bounded response function that maps any real value to [min_val, max_val].
+    Uses sigmoid to bound the range: min_val + (max_val - min_val) * sigmoid(x)
+
+    For log-space forecasting:
+    - sigma=0.3 means ~65% of values within factor of 1.35x
+    - sigma=0.5 means ~65% of values within factor of 1.65x
+    - sigma=0.6 means ~65% of values within factor of 1.82x
+
+    Works with both NumPy arrays and PyTorch tensors.
+    """
+    # Check if input is a PyTorch tensor
+    try:
+        import torch
+        if isinstance(x, torch.Tensor):
+            x_clamped = torch.clamp(x, -20, 20)
+            sigmoid = 1.0 / (1.0 + torch.exp(-x_clamped))
+            return min_val + (max_val - min_val) * sigmoid
+    except ImportError:
+        pass
+
+    # NumPy path
+    sigmoid = 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
+    return min_val + (max_val - min_val) * sigmoid
+
+
+class BoundedSigmoidFn:
+    """
+    Picklable callable class for bounded sigmoid response function.
+
+    This replaces the closure-based approach which cannot be pickled.
+    Used as the scale response function in GaussianFrozenLocBounded.
+    """
+    def __init__(self, min_val=0.15, max_val=0.45):
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def __call__(self, x):
+        return bounded_sigmoid_fn(x, self.min_val, self.max_val)
+
+    def __reduce__(self):
+        """Enable pickling by returning constructor and args."""
+        return (BoundedSigmoidFn, (self.min_val, self.max_val))
 
 
 class GaussianFrozenLoc(DistributionClass):
@@ -92,7 +141,85 @@ class GaussianFrozenLoc(DistributionClass):
             # Ensure scale is positive
             scale = np.maximum(scale, 1e-6)
             # Calculate quantiles for each sample
-            quantile_preds = np.array([stats.norm.ppf(quantiles, loc=loc[i], scale=scale[i]) 
+            quantile_preds = np.array([stats.norm.ppf(quantiles, loc=loc[i], scale=scale[i])
                                      for i in range(len(loc))])
-        
+
+        return quantile_preds
+
+
+class GaussianFrozenLocBounded(DistributionClass):
+    """
+    Bounded version of GaussianFrozenLoc that constrains sigma to [0.1, 0.6].
+
+    Uses a sigmoid response function instead of exp for the scale parameter,
+    which naturally bounds sigma to a reasonable range for log-space forecasting.
+
+    This ensures the model learns meaningful uncertainty within the bounded range
+    rather than predicting unbounded sigma values that need to be clipped.
+    """
+    _class_printed = False
+
+    def __init__(self, stabilization="MAD", sigma_min=0.15, sigma_max=0.45):
+        from lightgbmlss.distributions.Gaussian import identity_fn, Gaussian_Torch
+
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+
+        # Use picklable callable class instead of closure
+        # Tighter range [0.15, 0.45] allows model to learn meaningful variation
+        # sigma=0.3 (midpoint) means ~65% within factor of 1.35x
+        bounded_scale_fn = BoundedSigmoidFn(sigma_min, sigma_max)
+
+        distribution = Gaussian_Torch
+        param_dict = {"loc": identity_fn, "scale": bounded_scale_fn}
+
+        super().__init__(
+            distribution=distribution,
+            univariate=True,
+            discrete=False,
+            n_dist_param=len(param_dict),
+            stabilization=stabilization,
+            param_dict=param_dict,
+            distribution_arg_names=list(param_dict.keys()),
+            loss_fn="nll"
+        )
+
+        self.dist_class = Gaussian()
+
+    def compute_gradients_and_hessians(self, loss, predt, weights=None):
+        """
+        Freeze μ gradients completely and only allow σ learning.
+        """
+        if not GaussianFrozenLocBounded._class_printed:
+            print(f"*** Using GaussianFrozenLocBounded (frozen μ, σ ∈ [{self.sigma_min}, {self.sigma_max}]) ***")
+            GaussianFrozenLocBounded._class_printed = True
+
+        grad, hess = self.dist_class.compute_gradients_and_hessians(loss, predt, weights)
+
+        if grad.ndim == 1 and self.n_dist_param == 2:
+            n_samples = len(grad) // 2
+            grad[:n_samples] = 0.0
+            hess[:n_samples] = 1e-12
+
+        return grad, hess
+
+    def quantile(self, quantiles: list, pred_dist: np.ndarray, **kwargs) -> np.ndarray:
+        """
+        Calculates the quantiles of the distribution using scipy.stats.
+        """
+        from scipy import stats
+
+        if hasattr(pred_dist, 'values'):
+            pred_dist = pred_dist.values
+
+        if pred_dist.ndim == 1:
+            loc, scale = pred_dist[0], pred_dist[1]
+            quantile_preds = stats.norm.ppf(quantiles, loc=loc, scale=scale)
+        else:
+            loc = pred_dist[:, 0]
+            scale = pred_dist[:, 1]
+            scale = np.maximum(scale, 1e-6)
+            quantile_preds = np.array([stats.norm.ppf(quantiles, loc=loc[i], scale=scale[i])
+                                     for i in range(len(loc))])
+
         return quantile_preds

@@ -99,6 +99,10 @@ for h in h_list:
         'src': f'forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h{h}_forecasts.csv',
         'dst': f'forecasts/prospective/TwoStage-FrozenMu-t10_h{h}_prospective_{ts}.csv'
     })
+    tasks.append({
+        'src': f'forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h{h}_forecasts.csv',
+        'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded_h{h}_prospective_{ts}.csv'
+    })
 
 files_created = 0
 for task in tasks:

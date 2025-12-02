@@ -32,6 +32,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 from contextlib import redirect_stdout
 from io import StringIO
+from collections import defaultdict
 
 # Import utilities
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__))))
@@ -46,7 +47,7 @@ try:
     import lightgbmlss
     from lightgbmlss.model import LightGBMLSS
     from lightgbmlss.distributions.Gaussian import Gaussian
-    from utils.distributions import GaussianFrozenLoc
+    from utils.distributions import GaussianFrozenLoc, GaussianFrozenLocBounded
 except ImportError:
     raise ImportError("lightgbmlss is required. Install with: pip install lightgbmlss")
 
@@ -54,9 +55,32 @@ warnings.filterwarnings("ignore")
 
 # CDC FluSight quantiles
 CDC_QUANTILES = np.array([
-    0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 
+    0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5,
     0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.975, 0.99
 ])
+
+
+def weighted_percentile(values, weights, quantiles):
+    """Compute weighted percentiles using linear interpolation.
+
+    Args:
+        values: Array of values
+        weights: Array of weights (will be normalized)
+        quantiles: Array of quantile levels (0-1)
+
+    Returns:
+        Array of interpolated values at the requested quantile levels
+    """
+    values = np.array(values)
+    weights = np.array(weights)
+    sorter = np.argsort(values)
+    values = values[sorter]
+    weights = weights[sorter]
+    # Normalize weights to get CDF
+    cumsum = np.cumsum(weights)
+    cdf = cumsum / cumsum[-1]
+    # Interpolate quantiles
+    return np.interp(quantiles, cdf, values)
 
 
 def persistence_forecast_quantiles(last_value: float, quantiles: np.ndarray, 
@@ -205,11 +229,19 @@ class BatchRetrospectiveForecastGenerator:
         locations = list(hyperparams.keys())
         print(f"Loaded hyperparameters for {len(locations)} locations")
         
-        # Extract log transform settings
+        # Extract log transform and bounded sigma settings
         use_log_transform = {}
         for location in locations:
             use_log_transform[location] = hyperparams[location].get('use_log_transform', False)
-        
+
+        # Detect bounded sigma mode from hyperparameters
+        first_location = locations[0]
+        is_bounded = hyperparams[first_location].get('bounded_sigma', False)
+        if is_bounded:
+            print(f"Model type: BOUNDED SIGMA (log-space quantiles, skip conformal)")
+        else:
+            print(f"Model type: STANDARD (conformal residual quantiles)")
+
         # Load models
         stage1_models = {}
         stage2_models = {}
@@ -284,7 +316,8 @@ class BatchRetrospectiveForecastGenerator:
                     mu_predictions = stage1_model.predict(X_train_transformed)
                     init_score = np.column_stack([mu_predictions, np.zeros_like(mu_predictions)]).ravel(order='F')
                     dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score, params={'verbose': -1})
-                    stage2_model = LightGBMLSS(GaussianFrozenLoc())
+                    dist = GaussianFrozenLocBounded() if is_bounded else GaussianFrozenLoc()
+                    stage2_model = LightGBMLSS(dist)
                     p2 = stage2_params['best_params'].copy(); p2['verbose'] = -1; p2['verbosity'] = -1
                     stage2_model.train(p2, dtrain2, num_boost_round=stage2_params['num_boost_round'])
                     # Store
@@ -295,7 +328,7 @@ class BatchRetrospectiveForecastGenerator:
         
         # Generate model forecasts
         model_forecasts = self.generate_model_forecasts(
-            hyperparams, stage1_models, stage2_models, use_log_transform, horizon
+            hyperparams, stage1_models, stage2_models, use_log_transform, horizon, is_bounded
         )
         
         # Generate persistence forecasts
@@ -308,16 +341,88 @@ class BatchRetrospectiveForecastGenerator:
         
     def generate_model_forecasts(self, hyperparams: Dict, stage1_models: Dict,
                                  stage2_models: Dict, use_log_transform: Dict,
-                                 horizon: int) -> Dict:
-        """Generate two-stage model forecasts using expanding window validation with conformal residual quantiles."""
+                                 horizon: int, is_bounded: bool = False) -> Dict:
+        """Generate two-stage model forecasts using expanding window validation.
 
-        print(f"\nGenerating two-stage model forecasts (using conformal residual quantiles on log1p scale)...")
+        If is_bounded=True: Use Stage 2 sigma directly in log space (skip conformal).
+        If is_bounded=False: Use conformal residual quantiles (legacy behavior).
+        """
+
+        if is_bounded:
+            print(f"\nGenerating two-stage model forecasts (BOUNDED: log-space sigma)...")
+        else:
+            print(f"\nGenerating two-stage model forecasts (STANDARD: conformal residual quantiles)...")
 
         all_forecasts = {}
 
-        # Conformal residual quantiles settings
-        RESIDUAL_LOOKBACK = 12  # Keep last 12 weeks of residuals per location
-        MIN_RESIDUALS_FOR_CONFORMAL = 8  # Minimum residuals needed to use conformal quantiles
+        # Conformal residual quantiles settings (for non-bounded models only)
+        RESIDUAL_LOOKBACK = 6  # Keep last 6 weeks of residuals (was 12)
+        MIN_RESIDUALS_FOR_CONFORMAL = 6  # Minimum residuals needed (keep in sync with lookback)
+        EWMA_ALPHA = 0.5  # Decay factor for residual weights (0 < alpha < 1, smaller = faster decay)
+
+        # Blending weights for unbounded models (t10, t100, persistence)
+        # These are static weights that sum to 1.0
+        W_T10 = 0.4    # Weight for t10 model median
+        W_T100 = 0.4   # Weight for t100 model median
+        W_PERS = 0.2   # Weight for persistence (last observed value)
+
+        # Try to load pre-computed medians from other model variants for blending
+        # This allows us to blend t10 + t100 + persistence even when running one model at a time
+        other_model_medians = {}  # Dict of (location, target_date) -> {'t10': val, 't100': val}
+
+        if not is_bounded:
+            # Attempt to load existing retrospective forecasts from both t10 and t100
+            for model_variant in ['lgbm_enhanced_t10', 'lgbm_enhanced_t100']:
+                forecast_file = os.path.join(
+                    os.path.dirname(os.path.dirname(hyperparams[list(hyperparams.keys())[0]].get('_source_file', ''))),
+                    'forecasts', 'retrospective', model_variant,
+                    f'TwoStage-FrozenMu_h{horizon}_forecasts.csv'
+                )
+                # Try standard path structure
+                for base_path in ['forecasts/retrospective', '../forecasts/retrospective']:
+                    candidate = os.path.join(base_path, model_variant, f'TwoStage-FrozenMu_h{horizon}_forecasts.csv')
+                    if os.path.exists(candidate):
+                        forecast_file = candidate
+                        break
+
+                if os.path.exists(forecast_file):
+                    try:
+                        df = pd.read_csv(forecast_file)
+                        # Extract median (quantile 0.5)
+                        median_df = df[df['output_type_id'] == 0.5].copy()
+                        median_df['target_end_date'] = pd.to_datetime(median_df['target_end_date'])
+
+                        # Build lookup: FIPS -> state name
+                        fips_to_state = {
+                            '01': 'Alabama', '02': 'Alaska', '04': 'Arizona', '05': 'Arkansas',
+                            '06': 'California', '08': 'Colorado', '09': 'Connecticut', '10': 'Delaware',
+                            '11': 'District of Columbia', '12': 'Florida', '13': 'Georgia', '15': 'Hawaii',
+                            '16': 'Idaho', '17': 'Illinois', '18': 'Indiana', '19': 'Iowa',
+                            '20': 'Kansas', '21': 'Kentucky', '22': 'Louisiana', '23': 'Maine',
+                            '24': 'Maryland', '25': 'Massachusetts', '26': 'Michigan', '27': 'Minnesota',
+                            '28': 'Mississippi', '29': 'Missouri', '30': 'Montana', '31': 'Nebraska',
+                            '32': 'Nevada', '33': 'New Hampshire', '34': 'New Jersey', '35': 'New Mexico',
+                            '36': 'New York', '37': 'North Carolina', '38': 'North Dakota', '39': 'Ohio',
+                            '40': 'Oklahoma', '41': 'Oregon', '42': 'Pennsylvania', '72': 'Puerto Rico',
+                            '44': 'Rhode Island', '45': 'South Carolina', '46': 'South Dakota', '47': 'Tennessee',
+                            '48': 'Texas', '49': 'Utah', '50': 'Vermont', '51': 'Virginia',
+                            '53': 'Washington', '54': 'West Virginia', '55': 'Wisconsin', '56': 'Wyoming',
+                            'US': 'US'
+                        }
+
+                        variant_key = 't10' if 't10' in model_variant else 't100'
+                        for _, row in median_df.iterrows():
+                            loc_fips = str(row['location']).zfill(2) if row['location'] != 'US' else 'US'
+                            loc_name = fips_to_state.get(loc_fips, loc_fips)
+                            target_date = row['target_end_date']
+                            key = (loc_name, target_date)
+                            if key not in other_model_medians:
+                                other_model_medians[key] = {}
+                            other_model_medians[key][variant_key] = row['value']
+
+                        print(f"    Loaded {len(median_df)} medians from {model_variant} for blending")
+                    except Exception as e:
+                        print(f"    Warning: Could not load {forecast_file} for blending: {e}")
 
         for location in hyperparams.keys():
             if location not in stage1_models or location not in stage2_models:
@@ -358,7 +463,12 @@ class BatchRetrospectiveForecastGenerator:
             total_dates = len(val_dates_to_use)
 
             # Rolling residual store for this location (log1p space)
-            residuals_log = []
+            # Each entry is (residual_log, weight) for EWMA weighting
+            residuals_log = []  # List of (residual, weight) tuples
+
+            # Optional: Season bucket stores for extra stability
+            # Key: is_high_season boolean (True = Oct-Mar, False = Apr-Sep)
+            residual_stores_by_season = defaultdict(list)
 
             # Expanding window validation
             for i, val_date in enumerate(val_dates_to_use):
@@ -413,7 +523,8 @@ class BatchRetrospectiveForecastGenerator:
                         ]).ravel(order='F')
 
                         dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score)
-                        temp_stage2 = LightGBMLSS(GaussianFrozenLoc())
+                        dist = GaussianFrozenLocBounded() if is_bounded else GaussianFrozenLoc()
+                        temp_stage2 = LightGBMLSS(dist)
                         temp_stage2.train(
                             stage2_params['best_params'],
                             dtrain2,
@@ -461,56 +572,151 @@ class BatchRetrospectiveForecastGenerator:
                         mu_pred = np.expm1(mu_pred_raw)
                     else:
                         mu_pred = mu_pred_raw
-                    mu_pred_corrected = max(0.0, mu_pred)
+                    mu_pred_raw_linear = max(0.0, mu_pred)  # Store original model prediction
+                    mu_pred_corrected = mu_pred_raw_linear
 
-                    # --- CONFORMAL RESIDUAL QUANTILES ---
-                    # Generate quantiles using empirical residuals on log1p scale
+                    # --- BLENDED MEDIAN (for unbounded models only) ---
+                    # Get persistence value (last observed value at reference date)
+                    last_value_row = self.data.loc[self.data['date'] == val_date, location]
+                    last_value = last_value_row.iloc[0] if len(last_value_row) > 0 else mu_pred_corrected
+
+                    # For unbounded models, compute blended median from t10, t100, and persistence
+                    blended_mu = mu_pred_corrected  # Default to current model's prediction
+
+                    if not is_bounded:
+                        # Look up pre-computed medians from other model variants
+                        blend_key = (location, target_date)
+                        other_medians = other_model_medians.get(blend_key, {})
+
+                        mu_t10 = other_medians.get('t10')
+                        mu_t100 = other_medians.get('t100')
+
+                        # Compute blended median based on available components
+                        if mu_t10 is not None and mu_t100 is not None:
+                            # Full blend: t10 + t100 + persistence
+                            blended_mu = W_T10 * mu_t10 + W_T100 * mu_t100 + W_PERS * last_value
+                        elif mu_t10 is not None:
+                            # t10 + persistence (no t100)
+                            w_t10_adj = W_T10 / (W_T10 + W_PERS)
+                            w_pers_adj = W_PERS / (W_T10 + W_PERS)
+                            blended_mu = w_t10_adj * mu_t10 + w_pers_adj * last_value
+                        elif mu_t100 is not None:
+                            # t100 + persistence (no t10)
+                            w_t100_adj = W_T100 / (W_T100 + W_PERS)
+                            w_pers_adj = W_PERS / (W_T100 + W_PERS)
+                            blended_mu = w_t100_adj * mu_t100 + w_pers_adj * last_value
+                        else:
+                            # Fallback: current model + persistence (50/50)
+                            blended_mu = 0.5 * mu_pred_corrected + 0.5 * last_value
+
+                        blended_mu = max(0.0, blended_mu)
+
+                        # Use blended_mu as the corrected prediction for conformal residuals
+                        mu_pred_corrected = blended_mu
+
+                    # --- QUANTILE GENERATION ---
                     from scipy.stats import norm
 
-                    if len(residuals_log) >= MIN_RESIDUALS_FOR_CONFORMAL:
-                        # Use conformal residual quantiles
-                        mu_log = np.log1p(max(mu_pred_corrected, 0.0))
-                        residual_quantiles = np.percentile(residuals_log, self.quantiles * 100)
-                        q_log = mu_log + residual_quantiles
-                        quantile_forecasts = [max(0.0, np.expm1(val)) for val in q_log]
-                    else:
-                        # Fallback to Stage-2 sigma with conservative cap
+                    if is_bounded:
+                        # BOUNDED MODE: Use Stage 2 sigma directly in log space
+                        # mu_pred_raw is already in log space (because use_log_transform=True for bounded)
+                        mu_log = mu_pred_raw
+
+                        # Get sigma from Stage 2 (in log space)
                         dist_params = temp_stage2.predict(X_pred_last, pred_type="parameters")
                         if hasattr(dist_params, 'values'):
                             dist_params = dist_params.values
-
                         if dist_params.ndim > 1:
-                            sigma_pred = dist_params[0, 1]
+                            sigma_log = dist_params[0, 1]
                         else:
-                            sigma_pred = dist_params[1]
+                            sigma_log = dist_params[1]
+                        sigma_log = max(sigma_log, 1e-6)
 
-                        sigma_pred = max(sigma_pred, 1e-6)
-
-                        # Cap sigma conservatively until we have enough residuals
-                        sigma_cap = max(1.0 * abs(mu_pred_corrected), 50.0)
-                        sigma_pred = min(sigma_pred, sigma_cap)
-
+                        # Generate quantiles in log space, then transform back
                         quantile_forecasts = []
                         for q in self.quantiles:
-                            pred = norm.ppf(q, loc=mu_pred_corrected, scale=sigma_pred)
-                            quantile_forecasts.append(max(pred, 0.0))
+                            q_log = norm.ppf(q, loc=mu_log, scale=sigma_log)
+                            q_linear = np.expm1(q_log)
+                            quantile_forecasts.append(max(0.0, q_linear))
 
-                    # --- RECORD RESIDUAL FOR FUTURE FORECASTS ---
-                    # Compute residual in log1p space: log1p(actual) - log1p(mu_pred)
-                    residual_log = np.log1p(max(actual_value, 0.0)) - np.log1p(max(mu_pred_corrected, 0.0))
-                    residuals_log.append(residual_log)
+                        # No residual tracking for bounded models
 
-                    # Maintain rolling window
-                    if len(residuals_log) > RESIDUAL_LOOKBACK:
-                        residuals_log.pop(0)
+                    else:
+                        # STANDARD MODE: Use conformal residual quantiles with EWMA weighting
+
+                        # Determine current season for optional season bucketing
+                        is_high_season = (val_date.month >= 10 or val_date.month <= 3)
+
+                        # Try season-specific residuals first, then fall back to combined
+                        season_residuals = residual_stores_by_season.get(is_high_season, [])
+
+                        if len(residuals_log) >= MIN_RESIDUALS_FOR_CONFORMAL:
+                            # Use EWMA-weighted conformal residual quantiles
+                            mu_log = np.log1p(max(mu_pred_corrected, 0.0))
+
+                            # Extract values and weights
+                            res_vals = [r for r, w in residuals_log]
+                            res_wts = [w for r, w in residuals_log]
+
+                            # If we have enough season-specific residuals, prefer those
+                            if len(season_residuals) >= MIN_RESIDUALS_FOR_CONFORMAL:
+                                res_vals = [r for r, w in season_residuals]
+                                res_wts = [w for r, w in season_residuals]
+
+                            # Compute weighted quantiles
+                            residual_quantiles = weighted_percentile(res_vals, res_wts, self.quantiles)
+                            q_log = mu_log + residual_quantiles
+                            quantile_forecasts = [max(0.0, np.expm1(val)) for val in q_log]
+                        else:
+                            # Fallback to Stage-2 sigma with conservative cap
+                            dist_params = temp_stage2.predict(X_pred_last, pred_type="parameters")
+                            if hasattr(dist_params, 'values'):
+                                dist_params = dist_params.values
+
+                            if dist_params.ndim > 1:
+                                sigma_pred = dist_params[0, 1]
+                            else:
+                                sigma_pred = dist_params[1]
+
+                            sigma_pred = max(sigma_pred, 1e-6)
+
+                            # Cap sigma conservatively until we have enough residuals
+                            sigma_cap = max(1.0 * abs(mu_pred_corrected), 50.0)
+                            sigma_pred = min(sigma_pred, sigma_cap)
+
+                            quantile_forecasts = []
+                            for q in self.quantiles:
+                                pred = norm.ppf(q, loc=mu_pred_corrected, scale=sigma_pred)
+                                quantile_forecasts.append(max(pred, 0.0))
+
+                        # Record residual for future forecasts (only for standard mode)
+                        residual_log = np.log1p(max(actual_value, 0.0)) - np.log1p(max(mu_pred_corrected, 0.0))
+
+                        # Apply EWMA decay to existing weights before adding new residual
+                        residuals_log = [(res, wt * EWMA_ALPHA) for res, wt in residuals_log]
+                        residuals_log.append((residual_log, 1.0))
+
+                        # Also add to season-specific store with EWMA decay
+                        residual_stores_by_season[is_high_season] = [
+                            (res, wt * EWMA_ALPHA) for res, wt in residual_stores_by_season[is_high_season]
+                        ]
+                        residual_stores_by_season[is_high_season].append((residual_log, 1.0))
+
+                        # Prune to RESIDUAL_LOOKBACK entries
+                        if len(residuals_log) > RESIDUAL_LOOKBACK:
+                            residuals_log = residuals_log[-RESIDUAL_LOOKBACK:]
+                        if len(residual_stores_by_season[is_high_season]) > RESIDUAL_LOOKBACK:
+                            residual_stores_by_season[is_high_season] = residual_stores_by_season[is_high_season][-RESIDUAL_LOOKBACK:]
 
                     forecast_results.append({
                         'forecast_date': val_date,
                         'target_date': target_date,
                         'actual_value': actual_value,
                         'quantile_forecasts': np.array(quantile_forecasts),
-                        'mu_pred': mu_pred_corrected,
-                        'n_residuals': len(residuals_log)
+                        'mu_pred': mu_pred_corrected,  # This is blended_mu for unbounded, raw for bounded
+                        'mu_pred_raw': mu_pred_raw_linear,  # Original model prediction before blending
+                        'last_value': last_value if not is_bounded else None,  # Persistence value
+                        'n_residuals': len(residuals_log) if not is_bounded else 0
                     })
 
                 except Exception as e:
@@ -518,7 +724,10 @@ class BatchRetrospectiveForecastGenerator:
                     continue
 
             all_forecasts[location] = forecast_results
-            print(f"    Generated {len(forecast_results)} forecasts (conformal after {MIN_RESIDUALS_FOR_CONFORMAL} residuals)")
+            if is_bounded:
+                print(f"    Generated {len(forecast_results)} forecasts (bounded log-space sigma)")
+            else:
+                print(f"    Generated {len(forecast_results)} forecasts (conformal after {MIN_RESIDUALS_FOR_CONFORMAL} residuals)")
 
         return all_forecasts
         

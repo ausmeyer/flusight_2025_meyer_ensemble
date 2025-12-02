@@ -53,7 +53,7 @@ try:
     import lightgbmlss
     from lightgbmlss.model import LightGBMLSS
     from lightgbmlss.distributions.Gaussian import Gaussian
-    from utils.distributions import GaussianFrozenLoc
+    from utils.distributions import GaussianFrozenLoc, GaussianFrozenLocBounded
 except ImportError:
     raise ImportError("lightgbmlss is required. Install with: pip install lightgbmlss")
 
@@ -65,13 +65,15 @@ class TwoStageTrainer:
     Complete two-stage training pipeline with Optuna optimization for both stages.
     """
     
-    def __init__(self, cut_off_date: str, horizon: int = 1, max_lags: int = 12, 
+    def __init__(self, cut_off_date: str, horizon: int = 1, max_lags: int = 12,
                  trials_stage1: int = 100, trials_stage2: int = 100, random_seed: int = 42,
                  use_enhanced_features: bool = False, n_features: int = 5,
                  use_log_transform: bool = False,
                  num_threads: int = None,
                  optuna_jobs: int = 1,
-                 disable_stage2_pruning: bool = False):
+                 disable_stage2_pruning: bool = False,
+                 bounded_sigma: bool = False,
+                 models_output_dir: str = "models"):
         self.cut_off_date = pd.to_datetime(cut_off_date)
         self.horizon = horizon
         self.max_lags = max_lags
@@ -80,12 +82,18 @@ class TwoStageTrainer:
         self.random_seed = random_seed
         self.use_enhanced_features = use_enhanced_features
         self.n_features = n_features
-        self.use_log_transform = use_log_transform
+        self.bounded_sigma = bounded_sigma
+        self.models_output_dir = models_output_dir
+        # If bounded_sigma is True, force log transform
+        if bounded_sigma:
+            self.use_log_transform = True
+        else:
+            self.use_log_transform = use_log_transform
         self.processor = TimeSeriesDataProcessor()
         # Threading / parallelism controls
         self.num_threads = num_threads if num_threads and num_threads > 0 else (os.cpu_count() or 1)
         self.optuna_jobs = max(1, int(optuna_jobs))
-        
+
         # Storage for results
         self.stage1_results = {}
         self.stage2_results = {}
@@ -507,7 +515,8 @@ class TwoStageTrainer:
                 
                 # Train LightGBMLSS model with frozen μ
                 dtrain = lgb.Dataset(X_cv_train, label=y_cv_train, init_score=init_score, params={'verbose': -1})
-                lgbmlss_model = LightGBMLSS(GaussianFrozenLoc())
+                dist = GaussianFrozenLocBounded() if self.bounded_sigma else GaussianFrozenLoc()
+                lgbmlss_model = LightGBMLSS(dist)
                 # Train directly (no wrapper)
                 lgbmlss_model.train(params, dtrain, num_boost_round=num_boost_round)
                 
@@ -533,30 +542,40 @@ class TwoStageTrainer:
                     except Exception:
                         pass
                 
-                # If using log transform, sigma is in log space - need to scale it
-                if self.use_log_transform:
-                    # Convert sigma from log space to original space
-                    # This is approximate - assumes log-normal distribution
-                    sigma_pred = sigma_pred * mu_pred_val[0]
-                
                 # Calculate WIS using quantile predictions (proper Stage 2 metric)
                 from scipy.stats import norm
                 # Define CDC FluSight quantiles
-                CDC_QUANTILES = np.array([0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 
+                CDC_QUANTILES = np.array([0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5,
                                          0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.975, 0.99])
                 # Import WIS function from utils
                 from utils.wis_function_python import wis as cdc_wis
-                
+
                 sigma_pred = max(sigma_pred, 1e-6)  # Ensure positive
-                
-                # Generate quantile predictions from Gaussian(μ, σ)
-                quantile_preds = norm.ppf(CDC_QUANTILES, loc=mu_pred_val[0], scale=sigma_pred)
-                # Ensure non-negative (for hospitalization data)
-                quantile_preds = np.maximum(quantile_preds, 0.0)
-                
+
+                if self.bounded_sigma:
+                    # BOUNDED MODE: Generate quantiles in log space, then transform back
+                    mu_log = np.log1p(mu_pred_val[0])
+                    sigma_log = sigma_pred  # Already in log space
+
+                    quantile_preds = []
+                    for q in CDC_QUANTILES:
+                        q_log = norm.ppf(q, loc=mu_log, scale=sigma_log)
+                        q_linear = np.expm1(q_log)
+                        quantile_preds.append(max(0.0, q_linear))
+                    quantile_preds = np.array(quantile_preds)
+                else:
+                    # STANDARD MODE: Linear-space quantiles
+                    if self.use_log_transform:
+                        # Convert sigma from log space to original space
+                        sigma_pred = sigma_pred * mu_pred_val[0]
+                    # Generate quantile predictions from Gaussian(μ, σ)
+                    quantile_preds = norm.ppf(CDC_QUANTILES, loc=mu_pred_val[0], scale=sigma_pred)
+                    # Ensure non-negative (for hospitalization data)
+                    quantile_preds = np.maximum(quantile_preds, 0.0)
+
                 # Calculate WIS for this single prediction
-                wis_score = cdc_wis(np.array([target_value]), 
-                                   quantile_preds.reshape(1, -1), 
+                wis_score = cdc_wis(np.array([target_value]),
+                                   quantile_preds.reshape(1, -1),
                                    CDC_QUANTILES)
                 cv_scores.append(np.mean(wis_score))
                 folds_kept += 1
@@ -739,7 +758,8 @@ class TwoStageTrainer:
                 mu_pred_val = fold['mu_pred_val']
 
                 # Train LightGBMLSS and predict parameters (no wrapper)
-                lgbmlss_model = LightGBMLSS(GaussianFrozenLoc())
+                dist = GaussianFrozenLocBounded() if self.bounded_sigma else GaussianFrozenLoc()
+                lgbmlss_model = LightGBMLSS(dist)
                 lgbmlss_model.train(params, dtrain, num_boost_round=num_boost_round)
 
                 dist_params = lgbmlss_model.predict(X_pred, pred_type="parameters")
@@ -753,16 +773,40 @@ class TwoStageTrainer:
                 else:
                     sigma_pred = dist_params[-1]
                 sigma_pred = max(sigma_pred, 1e-6)
-                if self.use_log_transform:
-                    sigma_pred = sigma_pred * mu_pred_val
 
                 # WIS score for this fold
                 from scipy.stats import norm
                 CDC_QUANTILES = np.array([0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5,
                                           0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.975, 0.99])
                 from utils.wis_function_python import wis as cdc_wis
-                quantile_preds = norm.ppf(CDC_QUANTILES, loc=mu_pred_val, scale=sigma_pred)
-                quantile_preds = np.maximum(quantile_preds, 0.0)
+
+                if self.bounded_sigma:
+                    # BOUNDED MODE: Generate quantiles in log space, then transform back
+                    # mu_pred_val is in original scale (inverse-transformed)
+                    # sigma_pred is already bounded to [0.1, 0.6] by GaussianFrozenLocBounded
+                    mu_log = np.log1p(max(mu_pred_val, 0))
+                    sigma_log = sigma_pred  # Already bounded by distribution
+
+                    # Debug first few folds
+                    if len(cv_scores) < 2:
+                        print(f"  [DEBUG] mu_pred_val={mu_pred_val:.2f}, mu_log={mu_log:.4f}, sigma={sigma_log:.4f}, target={target_value:.2f}")
+
+                    quantile_preds = []
+                    for q in CDC_QUANTILES:
+                        q_log = norm.ppf(q, loc=mu_log, scale=sigma_log)
+                        q_linear = np.expm1(q_log)
+                        quantile_preds.append(max(0.0, q_linear))
+                    quantile_preds = np.array(quantile_preds)
+
+                    if len(cv_scores) < 2:
+                        print(f"  [DEBUG] q0.5={quantile_preds[11]:.2f}, q0.01={quantile_preds[0]:.2f}, q0.99={quantile_preds[-1]:.2f}")
+                else:
+                    # STANDARD MODE: Linear-space quantiles
+                    if self.use_log_transform:
+                        sigma_pred = sigma_pred * mu_pred_val
+                    quantile_preds = norm.ppf(CDC_QUANTILES, loc=mu_pred_val, scale=sigma_pred)
+                    quantile_preds = np.maximum(quantile_preds, 0.0)
+
                 wis_score = cdc_wis(np.array([target_value]), quantile_preds.reshape(1, -1), CDC_QUANTILES)
                 cv_scores.append(np.mean(wis_score))
                 folds_kept += 1
@@ -885,10 +929,12 @@ class TwoStageTrainer:
         
     def train_stage2(self, train_df: pd.DataFrame, full_df: pd.DataFrame, location: str, stage1_model: Dict) -> Dict:
         """Train Stage 2: LightGBMLSS for σ parameter with frozen μ."""
-        
+
         print(f"\\n{'='*60}")
         print(f"STAGE 2: Training LightGBMLSS scale model for {location}")
         print(f"Using frozen μ from Stage 1 model")
+        if self.bounded_sigma:
+            print(f"Mode: BOUNDED SIGMA (log-space training with clamped residuals)")
         print(f"{'='*60}")
         
         # Use same features and lags as Stage 1
@@ -966,7 +1012,8 @@ class TwoStageTrainer:
         })
         
         dtrain = lgb.Dataset(X_train, label=y_train, init_score=init_score, params={'verbose': -1})
-        lgbmlss_model = LightGBMLSS(GaussianFrozenLoc())
+        dist = GaussianFrozenLocBounded() if self.bounded_sigma else GaussianFrozenLoc()
+        lgbmlss_model = LightGBMLSS(dist)
         lgbmlss_model.train(best_params, dtrain, num_boost_round=num_boost_round)
         
         # Use CV WIS as the performance metric
@@ -982,9 +1029,10 @@ class TwoStageTrainer:
             'cv_wis': study.best_value,
             'location': location,
             'stage': 2,
-            'use_log_transform': self.use_log_transform
+            'use_log_transform': self.use_log_transform,
+            'bounded_sigma': self.bounded_sigma
         }
-        
+
     def train_all_locations(self, data_file: str, locations: List[str]) -> None:
         """Train two-stage models for all specified locations."""
         
@@ -1018,43 +1066,45 @@ class TwoStageTrainer:
         
     def save_models(self) -> None:
         """Save all trained models and parameters."""
-        
+
         print("\\nSaving trained models...")
-        
-        # Create output directories
-        os.makedirs("models/point_mu", exist_ok=True)
-        os.makedirs("models/scale_sigma", exist_ok=True)
-        
+
+        # Create output directories using models_output_dir
+        point_mu_dir = os.path.join(self.models_output_dir, "point_mu")
+        scale_sigma_dir = os.path.join(self.models_output_dir, "scale_sigma")
+        os.makedirs(point_mu_dir, exist_ok=True)
+        os.makedirs(scale_sigma_dir, exist_ok=True)
+
         for location in self.stage1_results.keys():
             # Save Stage 1 model
             stage1_data = self.stage1_results[location]
-            
+
             # Save booster
-            booster_file = f"models/point_mu/{location}_h{self.horizon}_booster.txt"
+            booster_file = os.path.join(point_mu_dir, f"{location}_h{self.horizon}_booster.txt")
             stage1_data['booster'].save_model(booster_file)
-            
+
             # Save parameters
-            params_file = f"models/point_mu/{location}_h{self.horizon}_best_params.pkl"
+            params_file = os.path.join(point_mu_dir, f"{location}_h{self.horizon}_best_params.pkl")
             save_params = {k: v for k, v in stage1_data.items() if k != 'booster'}
             with open(params_file, 'wb') as f:
                 pickle.dump(save_params, f)
-            
+
             # Save Stage 2 model
             stage2_data = self.stage2_results[location]
-            
+
             # Save LightGBMLSS model (as pickle)
-            model_file = f"models/scale_sigma/{location}_h{self.horizon}_lgbmlss_model.pkl"
+            model_file = os.path.join(scale_sigma_dir, f"{location}_h{self.horizon}_lgbmlss_model.pkl")
             with open(model_file, 'wb') as f:
                 pickle.dump(stage2_data['lgbmlss_model'], f)
-            
+
             # Save parameters
-            params_file = f"models/scale_sigma/{location}_h{self.horizon}_best_params.pkl"
+            params_file = os.path.join(scale_sigma_dir, f"{location}_h{self.horizon}_best_params.pkl")
             save_params = {k: v for k, v in stage2_data.items() if k != 'lgbmlss_model'}
             with open(params_file, 'wb') as f:
                 pickle.dump(save_params, f)
-            
+
             print(f"  Saved models for {location}")
-            
+
         # Save combined hyperparameters for retrospective script
         combined_params = {}
         for location in self.stage1_results.keys():
@@ -1063,16 +1113,17 @@ class TwoStageTrainer:
                 'stage2': self.stage2_results[location],
                 'horizon': self.horizon,
                 'cut_off_date': self.cut_off_date.strftime('%Y-%m-%d'),
-                'use_log_transform': self.use_log_transform
+                'use_log_transform': self.use_log_transform,
+                'bounded_sigma': self.bounded_sigma
             }
             # Remove unpicklable objects
             combined_params[location]['stage1'].pop('booster', None)
             combined_params[location]['stage2'].pop('lgbmlss_model', None)
-            
-        params_file = f"models/two_stage_hyperparameters_h{self.horizon}.pkl"
+
+        params_file = os.path.join(self.models_output_dir, f"two_stage_hyperparameters_h{self.horizon}.pkl")
         with open(params_file, 'wb') as f:
             pickle.dump(combined_params, f)
-            
+
         print(f"  Combined hyperparameters saved to: {params_file}")
         
     def print_summary(self) -> None:
@@ -1134,7 +1185,11 @@ def main():
                        help='Number of parallel Optuna trials (default: 1)')
     parser.add_argument('--stage2-debug', action='store_true',
                        help='Print Stage 2 debugging info for early folds')
-    
+    parser.add_argument('--bounded-sigma', action='store_true',
+                       help='Enable bounded sigma mode: force log transform, train Stage 2 on clamped log residuals')
+    parser.add_argument('--models-output-dir', type=str, default='models',
+                       help='Base output directory for trained models (default: models)')
+
     args = parser.parse_args()
     
     # Validate inputs
@@ -1153,7 +1208,9 @@ def main():
         n_features=args.n_features,
         use_log_transform=args.use_log_transform,
         num_threads=args.num_threads,
-        optuna_jobs=args.optuna_jobs
+        optuna_jobs=args.optuna_jobs,
+        bounded_sigma=args.bounded_sigma,
+        models_output_dir=args.models_output_dir
     )
 
     # Apply runtime flags (backward-compatible with older __init__ signatures)

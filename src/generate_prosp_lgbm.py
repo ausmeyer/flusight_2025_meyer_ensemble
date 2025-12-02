@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
+from collections import defaultdict
 
 # Import utilities
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__))))
@@ -45,7 +46,7 @@ try:
     import lightgbmlss
     from lightgbmlss.model import LightGBMLSS
     from lightgbmlss.distributions.Gaussian import Gaussian
-    from utils.distributions import GaussianFrozenLoc
+    from utils.distributions import GaussianFrozenLoc, GaussianFrozenLocBounded
 except ImportError:
     raise ImportError("lightgbmlss is required. Install with: pip install lightgbmlss")
 
@@ -53,9 +54,60 @@ warnings.filterwarnings("ignore")
 
 # CDC FluSight quantiles
 CDC_QUANTILES = np.array([
-    0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 
+    0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5,
     0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.975, 0.99
 ])
+
+# Conformal residual quantiles settings (must match retrospective generator)
+RESIDUAL_LOOKBACK = 6  # Keep last 6 weeks of residuals
+MIN_RESIDUALS_FOR_CONFORMAL = 6  # Minimum residuals needed
+EWMA_ALPHA = 0.5  # Decay factor for residual weights
+
+# Blending weights for unbounded models (t10, t100, persistence)
+W_T10 = 0.4    # Weight for t10 model median
+W_T100 = 0.4   # Weight for t100 model median
+W_PERS = 0.2   # Weight for persistence (last observed value)
+
+# FIPS code mappings
+FIPS_TO_STATE = {
+    '01': 'Alabama', '02': 'Alaska', '04': 'Arizona', '05': 'Arkansas',
+    '06': 'California', '08': 'Colorado', '09': 'Connecticut', '10': 'Delaware',
+    '11': 'District of Columbia', '12': 'Florida', '13': 'Georgia', '15': 'Hawaii',
+    '16': 'Idaho', '17': 'Illinois', '18': 'Indiana', '19': 'Iowa',
+    '20': 'Kansas', '21': 'Kentucky', '22': 'Louisiana', '23': 'Maine',
+    '24': 'Maryland', '25': 'Massachusetts', '26': 'Michigan', '27': 'Minnesota',
+    '28': 'Mississippi', '29': 'Missouri', '30': 'Montana', '31': 'Nebraska',
+    '32': 'Nevada', '33': 'New Hampshire', '34': 'New Jersey', '35': 'New Mexico',
+    '36': 'New York', '37': 'North Carolina', '38': 'North Dakota', '39': 'Ohio',
+    '40': 'Oklahoma', '41': 'Oregon', '42': 'Pennsylvania', '72': 'Puerto Rico',
+    '44': 'Rhode Island', '45': 'South Carolina', '46': 'South Dakota', '47': 'Tennessee',
+    '48': 'Texas', '49': 'Utah', '50': 'Vermont', '51': 'Virginia',
+    '53': 'Washington', '54': 'West Virginia', '55': 'Wisconsin', '56': 'Wyoming',
+    'US': 'US'
+}
+
+
+def weighted_percentile(values, weights, quantiles):
+    """Compute weighted percentiles using linear interpolation.
+
+    Args:
+        values: Array of values
+        weights: Array of weights (will be normalized)
+        quantiles: Array of quantile levels (0-1)
+
+    Returns:
+        Array of interpolated values at the requested quantile levels
+    """
+    values = np.array(values)
+    weights = np.array(weights)
+    sorter = np.argsort(values)
+    values = values[sorter]
+    weights = weights[sorter]
+    # Normalize weights to get CDF
+    cumsum = np.cumsum(weights)
+    cdf = cumsum / cumsum[-1]
+    # Interpolate quantiles
+    return np.interp(quantiles, cdf, values)
 
 
 class ProspectiveForecastGenerator:
@@ -118,7 +170,15 @@ class ProspectiveForecastGenerator:
                 print(f"  {location}: Using log transformation")
             else:
                 print(f"  Verified parameters for {location}")
-            
+
+        # Detect bounded sigma mode from hyperparameters
+        first_location = list(self.hyperparams.keys())[0]
+        self.is_bounded = self.hyperparams[first_location].get('bounded_sigma', False)
+        if self.is_bounded:
+            print(f"Model type: BOUNDED SIGMA (log-space quantiles)")
+        else:
+            print(f"Model type: STANDARD (linear-space quantiles)")
+
         print(f"All hyperparameters verified successfully")
         
     def load_data(self, data_file: str) -> None:
@@ -221,13 +281,14 @@ class ProspectiveForecastGenerator:
                 ]).ravel(order='F')
 
                 dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score, params={'verbose': -1})
-                final_stage2 = LightGBMLSS(GaussianFrozenLoc())
+                dist = GaussianFrozenLocBounded() if self.is_bounded else GaussianFrozenLoc()
+                final_stage2 = LightGBMLSS(dist)
                 p2 = stage2_params['best_params'].copy()
                 p2['verbose'] = -1
                 p2['verbosity'] = -1
                 final_stage2.train(
-                    p2, 
-                    dtrain2, 
+                    p2,
+                    dtrain2,
                     num_boost_round=stage2_params['num_boost_round']
                 )
                 
@@ -256,38 +317,54 @@ class ProspectiveForecastGenerator:
                 
                 # Use the last row for prediction (should be just one row anyway)
                 X_pred_last = X_pred_transformed[-1:]
-                
-                # Get μ prediction from Stage 1
-                mu_pred = final_stage1.predict(X_pred_last)[0]
-                
-                # Inverse transform μ if using log
-                if self.use_log_transform.get(location, False):
-                    mu_pred = np.expm1(mu_pred)
-                
+
+                # Get μ prediction from Stage 1 (in transformed space if log transform)
+                mu_pred_raw = final_stage1.predict(X_pred_last)[0]
+
                 # Get σ prediction from Stage 2
                 dist_params = final_stage2.predict(X_pred_last, pred_type="parameters")
                 if hasattr(dist_params, 'values'):
                     dist_params = dist_params.values
-                
+
                 if dist_params.ndim > 1:
                     sigma_pred = dist_params[0, 1]
                 else:
                     sigma_pred = dist_params[1]
-                
+
                 sigma_pred = max(sigma_pred, 1e-6)  # Ensure positive
-                
-                # If using log transform, scale sigma appropriately
-                if self.use_log_transform.get(location, False):
-                    # Convert sigma from log space to original space
-                    # This is approximate - assumes log-normal distribution
-                    sigma_pred = sigma_pred * mu_pred
-                
-                # Generate quantile forecasts
+
+                # Generate quantile forecasts based on mode
                 from scipy.stats import norm
-                quantile_forecasts = []
-                for q in self.quantiles:
-                    pred = norm.ppf(q, loc=mu_pred, scale=sigma_pred)
-                    quantile_forecasts.append(max(pred, 0.0))  # Truncate negatives
+
+                if self.is_bounded:
+                    # BOUNDED MODE: Generate quantiles in log space, then transform back
+                    # mu_pred_raw is in log space (because use_log_transform=True for bounded)
+                    mu_log = mu_pred_raw
+                    sigma_log = sigma_pred
+
+                    quantile_forecasts = []
+                    for q in self.quantiles:
+                        q_log = norm.ppf(q, loc=mu_log, scale=sigma_log)
+                        q_linear = np.expm1(q_log)
+                        quantile_forecasts.append(max(0.0, q_linear))
+
+                    # Convert mu to linear space for reporting
+                    mu_pred = np.expm1(mu_pred_raw)
+
+                else:
+                    # STANDARD MODE: Linear-space quantiles
+                    # Inverse transform μ if using log
+                    if self.use_log_transform.get(location, False):
+                        mu_pred = np.expm1(mu_pred_raw)
+                        # Scale sigma appropriately (approximate log-normal)
+                        sigma_pred = sigma_pred * mu_pred
+                    else:
+                        mu_pred = mu_pred_raw
+
+                    quantile_forecasts = []
+                    for q in self.quantiles:
+                        pred = norm.ppf(q, loc=mu_pred, scale=sigma_pred)
+                        quantile_forecasts.append(max(pred, 0.0))  # Truncate negatives
                 
                 # Calculate target date
                 target_date = self.last_date + pd.Timedelta(weeks=self.horizon)
@@ -493,11 +570,57 @@ def main():
     # Wrap the original generate_forecasts to record models
     _orig_generate = generator.generate_forecasts
     def _wrapped_generate():
-        forecasts_local = {}
-        # repeat core of generate_forecasts with small duplication to expose models
-        # Load data is already called
-        print(f"\nGenerating prospective forecasts with residual bias correction...")
+        """
+        Generate prospective forecasts with the same logic as retrospective:
+        - For BOUNDED models: Use Stage-2 sigma directly in log space
+        - For UNBOUNDED models: Use blended median (t10 + t100 + persistence) with conformal residual quantiles
+        """
+        from scipy.stats import norm
+
         all_forecasts_local = {}
+
+        # --- LOAD OTHER MODEL MEDIANS FOR BLENDING (unbounded only) ---
+        other_model_medians = {}  # Dict of location -> median value
+
+        if not generator.is_bounded:
+            # Load the most recent prospective forecasts from t10 and t100 for blending
+            # These should have been generated in the same pipeline run before this model
+            target_date = generator.last_date + pd.Timedelta(weeks=generator.horizon)
+            timestamp = generator.last_date.strftime('%Y%m%d')
+
+            for model_variant, model_key in [('TwoStage-FrozenMu-t10', 't10'), ('TwoStage-FrozenMu-t100', 't100')]:
+                # Try to find the prospective forecast file
+                prosp_file = os.path.join('forecasts/prospective', f'{model_variant}_h{generator.horizon}_prospective_{timestamp}.csv')
+                if not os.path.exists(prosp_file):
+                    # Try without timestamp
+                    candidates = sorted([f for f in os.listdir('forecasts/prospective') if f.startswith(f'{model_variant}_h{generator.horizon}_prospective_')])
+                    if candidates:
+                        prosp_file = os.path.join('forecasts/prospective', candidates[-1])
+
+                if os.path.exists(prosp_file):
+                    try:
+                        df = pd.read_csv(prosp_file)
+                        # Extract median (quantile 0.5)
+                        median_df = df[df['output_type_id'] == 0.5].copy()
+
+                        for _, row in median_df.iterrows():
+                            loc_fips = str(row['location']).zfill(2) if row['location'] != 'US' else 'US'
+                            loc_name = FIPS_TO_STATE.get(loc_fips, loc_fips)
+                            if loc_name not in other_model_medians:
+                                other_model_medians[loc_name] = {}
+                            other_model_medians[loc_name][model_key] = row['value']
+
+                        print(f"    Loaded {len(median_df)} medians from {model_variant} for blending")
+                    except Exception as e:
+                        print(f"    Warning: Could not load {prosp_file} for blending: {e}")
+
+        # --- MAIN FORECAST LOOP ---
+        print(f"\nGenerating prospective forecasts...")
+        if generator.is_bounded:
+            print("  Mode: BOUNDED (log-space sigma, no blending)")
+        else:
+            print("  Mode: UNBOUNDED (blended median + conformal residuals)")
+
         for location in generator.hyperparams.keys():
             print(f"  Generating forecast for {location}")
             try:
@@ -507,7 +630,7 @@ def main():
                 lags = stage1_params['lags']
                 selected_states = stage1_params['selected_states']
                 use_enhanced = (lags is None)
-                
+
                 # 1. Train models on FULL history
                 if use_enhanced:
                     X_train, y_train, _ = create_enhanced_features(generator.data, location, selected_states, end_date=None, horizon=generator.horizon)
@@ -515,7 +638,7 @@ def main():
                     X_train, y_train, _ = create_features(generator.data, location, selected_states, lags, end_date=None, horizon=generator.horizon)
                 if len(X_train) < 50:
                     continue
-                    
+
                 # Log transform handling
                 use_log = generator.use_log_transform.get(location, False)
                 if use_log:
@@ -524,112 +647,211 @@ def main():
                 else:
                     X_train_transformed = X_train
                     y_train_transformed = y_train
-                    
+
                 # Stage 1 Training
                 dtrain1 = lgb.Dataset(X_train_transformed, label=y_train_transformed, params={'verbose': -1})
                 p1 = stage1_params['best_params'].copy(); p1['verbose'] = -1; p1['verbosity'] = -1
                 final_stage1 = lgb.train(p1, dtrain1, num_boost_round=stage1_params['num_boost_round'], callbacks=[])
                 generator._final_stage1_models[location] = final_stage1
-                
+
                 # Stage 2 Training
                 mu_predictions = final_stage1.predict(X_train_transformed)
                 init_score = np.column_stack([mu_predictions, np.zeros_like(mu_predictions)]).ravel(order='F')
                 dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score, params={'verbose': -1})
-                final_stage2 = LightGBMLSS(GaussianFrozenLoc())
+                dist = GaussianFrozenLocBounded() if generator.is_bounded else GaussianFrozenLoc()
+                final_stage2 = LightGBMLSS(dist)
                 p2 = stage2_params['best_params'].copy(); p2['verbose'] = -1; p2['verbosity'] = -1
                 final_stage2.train(p2, dtrain2, num_boost_round=stage2_params['num_boost_round'])
                 generator._final_stage2_models[location] = final_stage2
 
-                # 2. Calculate Residual Bias (Median) over a validation window (e.g., last 8 weeks)
-                # We use an expanding window over the last few known points
-                bias_residuals = []
-                dates_sorted = sorted(generator.data['date'].unique())
-                # Look back up to 8 weeks for validation
-                val_anchors = [d for d in dates_sorted if d <= generator.last_date - pd.Timedelta(weeks=generator.horizon)]
-                val_anchors = val_anchors[-8:] 
-                
-                # To save time, we do NOT retrain for every point in this validation window. 
-                # We rely on the model trained on full data to predict recent past points.
-                # This is "in-sample" error on recent data, which acts as a proxy for "recent bias".
-                # Strictly, out-of-sample is better, but computationally expensive here.
-                # Given the robust feature set, recent in-sample residuals are often sufficient to detect systematic lag.
-                
-                for anchor in val_anchors:
-                    target_d = anchor + pd.Timedelta(weeks=generator.horizon)
-                    if target_d > generator.last_date:
-                        continue
-                    
-                    # Get features for this anchor
-                    if use_enhanced:
-                        X_anc, _ = create_enhanced_features_for_prediction(generator.data, location, selected_states, anchor_date=anchor, horizon=generator.horizon)
-                    else:
-                        X_anc, _ = create_features_for_prediction(generator.data, location, selected_states, lags, anchor_date=anchor, horizon=generator.horizon)
-                    
-                    if len(X_anc) == 0: continue
-                    
-                    # Predict
-                    if use_log:
-                        X_anc = np.log1p(np.maximum(X_anc, 0))
-                    
-                    mu_anc = final_stage1.predict(X_anc[-1:])[0]
-                    if use_log: mu_anc = np.expm1(mu_anc)
-                    
-                    # Actual
-                    actual = generator.data.loc[generator.data['date'] == target_d, location].values
-                    if len(actual) > 0:
-                        res = actual[0] - mu_anc
-                        bias_residuals.append(res)
-                
-                median_bias = np.median(bias_residuals) if len(bias_residuals) > 0 else 0.0
-                # Dampen bias if it's very large (heuristic safety)
-                # median_bias = np.sign(median_bias) * min(abs(median_bias), 50.0) # Optional safety cap?
-                
-                # 3. Generate Prospective Prediction
+                # 2. Generate prediction features for the prospective date
                 if use_enhanced:
                     X_pred, _ = create_enhanced_features_for_prediction(generator.data, location, selected_states, anchor_date=generator.last_date, horizon=generator.horizon)
                 else:
                     X_pred, _ = create_features_for_prediction(generator.data, location, selected_states, lags, anchor_date=generator.last_date, horizon=generator.horizon)
                 if len(X_pred) == 0:
                     continue
-                
+
                 if use_log:
                     X_pred_transformed = np.log1p(np.maximum(X_pred, 0))
                 else:
                     X_pred_transformed = X_pred
-                    
-                mu_pred = final_stage1.predict(X_pred_transformed[-1:])[0]
-                if use_log:
-                    mu_pred = np.expm1(mu_pred)
-                
-                # APPLY BIAS CORRECTION
-                mu_pred_corrected = mu_pred + median_bias
-                # Ensure non-negative
-                mu_pred_corrected = max(0.0, mu_pred_corrected)
-                
-                print(f"    Bias correction for {location}: {median_bias:.2f} (Raw μ: {mu_pred:.2f} -> Corrected: {mu_pred_corrected:.2f})")
 
-                # Stage 2 prediction
-                dist_params = final_stage2.predict(X_pred_transformed[-1:], pred_type="parameters")
-                if hasattr(dist_params, 'values'):
-                    dist_params = dist_params.values
-                sigma_pred = dist_params[0, 1] if dist_params.ndim > 1 else dist_params[1]
-                sigma_pred = max(float(sigma_pred), 1e-6)
-                
+                # Get raw mu prediction
+                mu_pred_raw = final_stage1.predict(X_pred_transformed[-1:])[0]
                 if use_log:
-                    # Approximate scaling for log-normal-ish behavior
-                    sigma_pred = sigma_pred * mu_pred_corrected
-                
-                from scipy.stats import norm
-                qvals = np.array([max(0.0, norm.ppf(q, loc=mu_pred_corrected, scale=sigma_pred)) for q in CDC_QUANTILES])
+                    mu_pred = np.expm1(mu_pred_raw)
+                else:
+                    mu_pred = mu_pred_raw
+                mu_pred_linear = max(0.0, mu_pred)
+
+                # Get persistence value (last observed value)
+                last_value_row = generator.data.loc[generator.data['date'] == generator.last_date, location]
+                last_value = last_value_row.iloc[0] if len(last_value_row) > 0 else mu_pred_linear
+
                 target_date = generator.last_date + pd.Timedelta(weeks=generator.horizon)
-                all_forecasts_local[location] = {
-                    'forecast_date': generator.last_date,
-                    'target_date': target_date,
-                    'mu': mu_pred_corrected,
-                    'sigma': sigma_pred,
-                    'quantile_forecasts': qvals,
-                    'bias_applied': median_bias
-                }
+
+                # --- QUANTILE GENERATION ---
+                if generator.is_bounded:
+                    # BOUNDED MODE: Use Stage 2 sigma directly in log space
+                    mu_log = mu_pred_raw  # Already in log space
+                    dist_params = final_stage2.predict(X_pred_transformed[-1:], pred_type="parameters")
+                    if hasattr(dist_params, 'values'):
+                        dist_params = dist_params.values
+                    sigma_log = dist_params[0, 1] if dist_params.ndim > 1 else dist_params[1]
+                    sigma_log = max(float(sigma_log), 1e-6)
+
+                    qvals = np.array([max(0.0, np.expm1(norm.ppf(q, loc=mu_log, scale=sigma_log))) for q in CDC_QUANTILES])
+
+                    all_forecasts_local[location] = {
+                        'forecast_date': generator.last_date,
+                        'target_date': target_date,
+                        'mu': mu_pred_linear,
+                        'sigma': sigma_log,
+                        'quantile_forecasts': qvals,
+                        'blended_mu': None,
+                        'last_value': None
+                    }
+                    print(f"    Bounded: μ={mu_pred_linear:.2f}, σ_log={sigma_log:.4f}")
+
+                else:
+                    # UNBOUNDED MODE: Blended median + conformal residual quantiles
+
+                    # 3a. Compute blended median
+                    loc_medians = other_model_medians.get(location, {})
+                    mu_t10 = loc_medians.get('t10')
+                    mu_t100 = loc_medians.get('t100')
+
+                    if mu_t10 is not None and mu_t100 is not None:
+                        blended_mu = W_T10 * mu_t10 + W_T100 * mu_t100 + W_PERS * last_value
+                    elif mu_t10 is not None:
+                        w_t10_adj = W_T10 / (W_T10 + W_PERS)
+                        w_pers_adj = W_PERS / (W_T10 + W_PERS)
+                        blended_mu = w_t10_adj * mu_t10 + w_pers_adj * last_value
+                    elif mu_t100 is not None:
+                        w_t100_adj = W_T100 / (W_T100 + W_PERS)
+                        w_pers_adj = W_PERS / (W_T100 + W_PERS)
+                        blended_mu = w_t100_adj * mu_t100 + w_pers_adj * last_value
+                    else:
+                        # Fallback: current model + persistence (50/50)
+                        blended_mu = 0.5 * mu_pred_linear + 0.5 * last_value
+
+                    blended_mu = max(0.0, blended_mu)
+
+                    # 3b. Build EWMA-weighted conformal residuals from recent history
+                    # Similar to retrospective: look back RESIDUAL_LOOKBACK weeks
+                    dates_sorted = sorted(generator.data['date'].unique())
+                    val_anchors = [d for d in dates_sorted if d <= generator.last_date - pd.Timedelta(weeks=generator.horizon)]
+                    val_anchors = val_anchors[-RESIDUAL_LOOKBACK:]
+
+                    residuals_log = []  # List of (residual, weight) tuples
+                    residual_stores_by_season = defaultdict(list)
+
+                    for i, anchor in enumerate(val_anchors):
+                        target_d = anchor + pd.Timedelta(weeks=generator.horizon)
+                        if target_d > generator.last_date:
+                            continue
+
+                        # Get actual value at target
+                        actual_row = generator.data.loc[generator.data['date'] == target_d, location]
+                        if len(actual_row) == 0:
+                            continue
+                        actual_value = actual_row.iloc[0]
+
+                        # Get blended prediction for this historical point
+                        # For simplicity, use the same blend weights with persistence at anchor
+                        hist_last_row = generator.data.loc[generator.data['date'] == anchor, location]
+                        hist_last_value = hist_last_row.iloc[0] if len(hist_last_row) > 0 else actual_value
+
+                        # Get model predictions at anchor (use trained model, in-sample proxy)
+                        if use_enhanced:
+                            X_anc, _ = create_enhanced_features_for_prediction(generator.data, location, selected_states, anchor_date=anchor, horizon=generator.horizon)
+                        else:
+                            X_anc, _ = create_features_for_prediction(generator.data, location, selected_states, lags, anchor_date=anchor, horizon=generator.horizon)
+
+                        if len(X_anc) == 0:
+                            continue
+
+                        if use_log:
+                            X_anc_transformed = np.log1p(np.maximum(X_anc, 0))
+                        else:
+                            X_anc_transformed = X_anc
+
+                        mu_anc_raw = final_stage1.predict(X_anc_transformed[-1:])[0]
+                        if use_log:
+                            mu_anc = np.expm1(mu_anc_raw)
+                        else:
+                            mu_anc = mu_anc_raw
+                        mu_anc = max(0.0, mu_anc)
+
+                        # Compute blended mu for this anchor (simplified: use current model + persistence)
+                        hist_blended = 0.5 * mu_anc + 0.5 * hist_last_value
+                        hist_blended = max(0.0, hist_blended)
+
+                        # Compute residual in log space
+                        residual_log = np.log1p(max(actual_value, 0.0)) - np.log1p(hist_blended)
+
+                        # Apply EWMA decay
+                        residuals_log = [(res, wt * EWMA_ALPHA) for res, wt in residuals_log]
+                        residuals_log.append((residual_log, 1.0))
+
+                        # Season bucketing
+                        is_high_season = (anchor.month >= 10 or anchor.month <= 3)
+                        residual_stores_by_season[is_high_season] = [
+                            (res, wt * EWMA_ALPHA) for res, wt in residual_stores_by_season[is_high_season]
+                        ]
+                        residual_stores_by_season[is_high_season].append((residual_log, 1.0))
+
+                        # Prune
+                        if len(residuals_log) > RESIDUAL_LOOKBACK:
+                            residuals_log = residuals_log[-RESIDUAL_LOOKBACK:]
+                        if len(residual_stores_by_season[is_high_season]) > RESIDUAL_LOOKBACK:
+                            residual_stores_by_season[is_high_season] = residual_stores_by_season[is_high_season][-RESIDUAL_LOOKBACK:]
+
+                    # 3c. Generate quantiles using conformal residuals
+                    # Determine current season
+                    is_high_season = (generator.last_date.month >= 10 or generator.last_date.month <= 3)
+                    season_residuals = residual_stores_by_season.get(is_high_season, [])
+
+                    if len(residuals_log) >= MIN_RESIDUALS_FOR_CONFORMAL:
+                        mu_log = np.log1p(blended_mu)
+
+                        # Use season-specific if available
+                        if len(season_residuals) >= MIN_RESIDUALS_FOR_CONFORMAL:
+                            res_vals = [r for r, w in season_residuals]
+                            res_wts = [w for r, w in season_residuals]
+                        else:
+                            res_vals = [r for r, w in residuals_log]
+                            res_wts = [w for r, w in residuals_log]
+
+                        residual_quantiles = weighted_percentile(res_vals, res_wts, CDC_QUANTILES)
+                        q_log = mu_log + residual_quantiles
+                        qvals = np.array([max(0.0, np.expm1(val)) for val in q_log])
+                        print(f"    Blended: μ_blend={blended_mu:.2f}, using {len(res_vals)} conformal residuals")
+                    else:
+                        # Fallback to parametric Gaussian with Stage-2 sigma
+                        dist_params = final_stage2.predict(X_pred_transformed[-1:], pred_type="parameters")
+                        if hasattr(dist_params, 'values'):
+                            dist_params = dist_params.values
+                        sigma_pred = dist_params[0, 1] if dist_params.ndim > 1 else dist_params[1]
+                        sigma_pred = max(float(sigma_pred), 1e-6)
+                        if use_log:
+                            sigma_pred = sigma_pred * blended_mu
+
+                        qvals = np.array([max(0.0, norm.ppf(q, loc=blended_mu, scale=sigma_pred)) for q in CDC_QUANTILES])
+                        print(f"    Blended: μ_blend={blended_mu:.2f}, fallback to parametric (only {len(residuals_log)} residuals)")
+
+                    all_forecasts_local[location] = {
+                        'forecast_date': generator.last_date,
+                        'target_date': target_date,
+                        'mu': blended_mu,
+                        'sigma': None,
+                        'quantile_forecasts': qvals,
+                        'blended_mu': blended_mu,
+                        'last_value': last_value,
+                        'mu_raw': mu_pred_linear
+                    }
+
             except Exception as e:
                 print(f"    Error: {e}")
                 continue

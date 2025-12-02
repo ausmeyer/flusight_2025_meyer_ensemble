@@ -80,6 +80,7 @@ echo "Cutoff: $CUTOFF"
 mkdir -p forecasts/retrospective/arima
 mkdir -p forecasts/retrospective/lgbm_enhanced_t100
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10
+mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded
 mkdir -p forecasts/prospective
 
 echo "==> Retrospective ARIMA"
@@ -94,6 +95,11 @@ python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF
 echo "==> Retrospective LGBM (t10; using hyperparams in models/lgbm_enhanced_t10)"
 python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
   --models-dir models/lgbm_enhanced_t10 --models-base-dir models/lgbm_enhanced_t10 \
+  --output-base forecasts/retrospective
+
+echo "==> Retrospective LGBM (t10_bounded; using hyperparams in models/lgbm_enhanced_t10_bounded)"
+python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
+  --models-dir models/lgbm_enhanced_t10_bounded --models-base-dir models/lgbm_enhanced_t10_bounded \
   --output-base forecasts/retrospective
 
 echo "==> Retrospective SVM (h=1..4)"
@@ -133,6 +139,16 @@ for H in 1 2 3 4; do
     --model-name TwoStage-FrozenMu-t10 \
     --save-models \
     --models-output-dir models/lgbm_enhanced_t10 || true
+
+  # t10_bounded prospective (uses GaussianFrozenLocBounded, direct log-space quantiles)
+  python src/generate_prosp_lgbm.py \
+    --hyperparams models/lgbm_enhanced_t10_bounded/two_stage_hyperparameters_h${H}.pkl \
+    --data-file "$STITCHED" \
+    --horizon ${H} \
+    --output forecasts/prospective \
+    --model-name TwoStage-FrozenMu-bounded \
+    --save-models \
+    --models-output-dir models/lgbm_enhanced_t10_bounded || true
 done
 
 echo "==> Prospective Adaptive Ensemble"
