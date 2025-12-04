@@ -47,7 +47,7 @@ try:
     import lightgbmlss
     from lightgbmlss.model import LightGBMLSS
     from lightgbmlss.distributions.Gaussian import Gaussian
-    from utils.distributions import GaussianFrozenLoc, GaussianFrozenLocBounded
+    from utils.distributions import GaussianFrozenLoc, GaussianFrozenLocBounded, GaussianFrozenLocBoundedWide
 except ImportError:
     raise ImportError("lightgbmlss is required. Install with: pip install lightgbmlss")
 
@@ -237,8 +237,11 @@ class BatchRetrospectiveForecastGenerator:
         # Detect bounded sigma mode from hyperparameters
         first_location = locations[0]
         is_bounded = hyperparams[first_location].get('bounded_sigma', False)
-        if is_bounded:
-            print(f"Model type: BOUNDED SIGMA (log-space quantiles, skip conformal)")
+        is_bounded_wide = hyperparams[first_location].get('bounded_sigma_wide', False)
+        if is_bounded_wide:
+            print(f"Model type: BOUNDED SIGMA WIDE (log-space quantiles, sigma in [0.1, 0.8])")
+        elif is_bounded:
+            print(f"Model type: BOUNDED SIGMA (log-space quantiles, sigma in [0.15, 0.45])")
         else:
             print(f"Model type: STANDARD (conformal residual quantiles)")
 
@@ -316,7 +319,12 @@ class BatchRetrospectiveForecastGenerator:
                     mu_predictions = stage1_model.predict(X_train_transformed)
                     init_score = np.column_stack([mu_predictions, np.zeros_like(mu_predictions)]).ravel(order='F')
                     dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score, params={'verbose': -1})
-                    dist = GaussianFrozenLocBounded() if is_bounded else GaussianFrozenLoc()
+                    if is_bounded_wide:
+                        dist = GaussianFrozenLocBoundedWide()
+                    elif is_bounded:
+                        dist = GaussianFrozenLocBounded()
+                    else:
+                        dist = GaussianFrozenLoc()
                     stage2_model = LightGBMLSS(dist)
                     p2 = stage2_params['best_params'].copy(); p2['verbose'] = -1; p2['verbosity'] = -1
                     stage2_model.train(p2, dtrain2, num_boost_round=stage2_params['num_boost_round'])
@@ -328,7 +336,8 @@ class BatchRetrospectiveForecastGenerator:
         
         # Generate model forecasts
         model_forecasts = self.generate_model_forecasts(
-            hyperparams, stage1_models, stage2_models, use_log_transform, horizon, is_bounded
+            hyperparams, stage1_models, stage2_models, use_log_transform, horizon,
+            is_bounded=is_bounded, is_bounded_wide=is_bounded_wide
         )
         
         # Generate persistence forecasts
@@ -338,17 +347,18 @@ class BatchRetrospectiveForecastGenerator:
         
         # Save forecasts (without summary)
         self.save_forecasts(model_forecasts, persistence_forecasts, horizon, output_dir)
-        
+
     def generate_model_forecasts(self, hyperparams: Dict, stage1_models: Dict,
                                  stage2_models: Dict, use_log_transform: Dict,
-                                 horizon: int, is_bounded: bool = False) -> Dict:
+                                 horizon: int, is_bounded: bool = False,
+                                 is_bounded_wide: bool = False) -> Dict:
         """Generate two-stage model forecasts using expanding window validation.
 
-        If is_bounded=True: Use Stage 2 sigma directly in log space (skip conformal).
-        If is_bounded=False: Use conformal residual quantiles (legacy behavior).
+        If is_bounded or is_bounded_wide: Use Stage 2 sigma directly in log space (skip conformal).
+        Otherwise: Use conformal residual quantiles (legacy behavior).
         """
 
-        if is_bounded:
+        if is_bounded or is_bounded_wide:
             print(f"\nGenerating two-stage model forecasts (BOUNDED: log-space sigma)...")
         else:
             print(f"\nGenerating two-stage model forecasts (STANDARD: conformal residual quantiles)...")
@@ -523,7 +533,12 @@ class BatchRetrospectiveForecastGenerator:
                         ]).ravel(order='F')
 
                         dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score)
-                        dist = GaussianFrozenLocBounded() if is_bounded else GaussianFrozenLoc()
+                        if is_bounded_wide:
+                            dist = GaussianFrozenLocBoundedWide()
+                        elif is_bounded:
+                            dist = GaussianFrozenLocBounded()
+                        else:
+                            dist = GaussianFrozenLoc()
                         temp_stage2 = LightGBMLSS(dist)
                         temp_stage2.train(
                             stage2_params['best_params'],

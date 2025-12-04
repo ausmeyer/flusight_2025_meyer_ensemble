@@ -53,7 +53,7 @@ try:
     import lightgbmlss
     from lightgbmlss.model import LightGBMLSS
     from lightgbmlss.distributions.Gaussian import Gaussian
-    from utils.distributions import GaussianFrozenLoc, GaussianFrozenLocBounded
+    from utils.distributions import GaussianFrozenLoc, GaussianFrozenLocBounded, GaussianFrozenLocBoundedWide
 except ImportError:
     raise ImportError("lightgbmlss is required. Install with: pip install lightgbmlss")
 
@@ -73,6 +73,7 @@ class TwoStageTrainer:
                  optuna_jobs: int = 1,
                  disable_stage2_pruning: bool = False,
                  bounded_sigma: bool = False,
+                 bounded_sigma_wide: bool = False,
                  models_output_dir: str = "models"):
         self.cut_off_date = pd.to_datetime(cut_off_date)
         self.horizon = horizon
@@ -83,9 +84,10 @@ class TwoStageTrainer:
         self.use_enhanced_features = use_enhanced_features
         self.n_features = n_features
         self.bounded_sigma = bounded_sigma
+        self.bounded_sigma_wide = bounded_sigma_wide
         self.models_output_dir = models_output_dir
-        # If bounded_sigma is True, force log transform
-        if bounded_sigma:
+        # If bounded_sigma or bounded_sigma_wide is True, force log transform
+        if bounded_sigma or bounded_sigma_wide:
             self.use_log_transform = True
         else:
             self.use_log_transform = use_log_transform
@@ -515,7 +517,12 @@ class TwoStageTrainer:
                 
                 # Train LightGBMLSS model with frozen μ
                 dtrain = lgb.Dataset(X_cv_train, label=y_cv_train, init_score=init_score, params={'verbose': -1})
-                dist = GaussianFrozenLocBounded() if self.bounded_sigma else GaussianFrozenLoc()
+                if self.bounded_sigma_wide:
+                    dist = GaussianFrozenLocBoundedWide()
+                elif self.bounded_sigma:
+                    dist = GaussianFrozenLocBounded()
+                else:
+                    dist = GaussianFrozenLoc()
                 lgbmlss_model = LightGBMLSS(dist)
                 # Train directly (no wrapper)
                 lgbmlss_model.train(params, dtrain, num_boost_round=num_boost_round)
@@ -552,7 +559,7 @@ class TwoStageTrainer:
 
                 sigma_pred = max(sigma_pred, 1e-6)  # Ensure positive
 
-                if self.bounded_sigma:
+                if self.bounded_sigma or self.bounded_sigma_wide:
                     # BOUNDED MODE: Generate quantiles in log space, then transform back
                     mu_log = np.log1p(mu_pred_val[0])
                     sigma_log = sigma_pred  # Already in log space
@@ -758,7 +765,12 @@ class TwoStageTrainer:
                 mu_pred_val = fold['mu_pred_val']
 
                 # Train LightGBMLSS and predict parameters (no wrapper)
-                dist = GaussianFrozenLocBounded() if self.bounded_sigma else GaussianFrozenLoc()
+                if self.bounded_sigma_wide:
+                    dist = GaussianFrozenLocBoundedWide()
+                elif self.bounded_sigma:
+                    dist = GaussianFrozenLocBounded()
+                else:
+                    dist = GaussianFrozenLoc()
                 lgbmlss_model = LightGBMLSS(dist)
                 lgbmlss_model.train(params, dtrain, num_boost_round=num_boost_round)
 
@@ -780,16 +792,17 @@ class TwoStageTrainer:
                                           0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.975, 0.99])
                 from utils.wis_function_python import wis as cdc_wis
 
-                if self.bounded_sigma:
+                if self.bounded_sigma or self.bounded_sigma_wide:
                     # BOUNDED MODE: Generate quantiles in log space, then transform back
                     # mu_pred_val is in original scale (inverse-transformed)
-                    # sigma_pred is already bounded to [0.1, 0.6] by GaussianFrozenLocBounded
+                    # sigma_pred is already bounded by distribution (narrow: [0.15, 0.45], wide: [0.1, 0.8])
                     mu_log = np.log1p(max(mu_pred_val, 0))
                     sigma_log = sigma_pred  # Already bounded by distribution
 
                     # Debug first few folds
                     if len(cv_scores) < 2:
-                        print(f"  [DEBUG] mu_pred_val={mu_pred_val:.2f}, mu_log={mu_log:.4f}, sigma={sigma_log:.4f}, target={target_value:.2f}")
+                        mode_name = "wide" if self.bounded_sigma_wide else "narrow"
+                        print(f"  [DEBUG {mode_name}] mu_pred_val={mu_pred_val:.2f}, mu_log={mu_log:.4f}, sigma={sigma_log:.4f}, target={target_value:.2f}")
 
                     quantile_preds = []
                     for q in CDC_QUANTILES:
@@ -933,8 +946,10 @@ class TwoStageTrainer:
         print(f"\\n{'='*60}")
         print(f"STAGE 2: Training LightGBMLSS scale model for {location}")
         print(f"Using frozen μ from Stage 1 model")
-        if self.bounded_sigma:
-            print(f"Mode: BOUNDED SIGMA (log-space training with clamped residuals)")
+        if self.bounded_sigma_wide:
+            print(f"Mode: BOUNDED SIGMA WIDE (σ ∈ [0.1, 0.8])")
+        elif self.bounded_sigma:
+            print(f"Mode: BOUNDED SIGMA (σ ∈ [0.15, 0.45])")
         print(f"{'='*60}")
         
         # Use same features and lags as Stage 1
@@ -1012,7 +1027,12 @@ class TwoStageTrainer:
         })
         
         dtrain = lgb.Dataset(X_train, label=y_train, init_score=init_score, params={'verbose': -1})
-        dist = GaussianFrozenLocBounded() if self.bounded_sigma else GaussianFrozenLoc()
+        if self.bounded_sigma_wide:
+            dist = GaussianFrozenLocBoundedWide()
+        elif self.bounded_sigma:
+            dist = GaussianFrozenLocBounded()
+        else:
+            dist = GaussianFrozenLoc()
         lgbmlss_model = LightGBMLSS(dist)
         lgbmlss_model.train(best_params, dtrain, num_boost_round=num_boost_round)
         
@@ -1030,7 +1050,8 @@ class TwoStageTrainer:
             'location': location,
             'stage': 2,
             'use_log_transform': self.use_log_transform,
-            'bounded_sigma': self.bounded_sigma
+            'bounded_sigma': self.bounded_sigma,
+            'bounded_sigma_wide': self.bounded_sigma_wide
         }
 
     def train_all_locations(self, data_file: str, locations: List[str]) -> None:
@@ -1114,7 +1135,8 @@ class TwoStageTrainer:
                 'horizon': self.horizon,
                 'cut_off_date': self.cut_off_date.strftime('%Y-%m-%d'),
                 'use_log_transform': self.use_log_transform,
-                'bounded_sigma': self.bounded_sigma
+                'bounded_sigma': self.bounded_sigma,
+                'bounded_sigma_wide': self.bounded_sigma_wide
             }
             # Remove unpicklable objects
             combined_params[location]['stage1'].pop('booster', None)
@@ -1186,7 +1208,9 @@ def main():
     parser.add_argument('--stage2-debug', action='store_true',
                        help='Print Stage 2 debugging info for early folds')
     parser.add_argument('--bounded-sigma', action='store_true',
-                       help='Enable bounded sigma mode: force log transform, train Stage 2 on clamped log residuals')
+                       help='Enable bounded sigma mode: sigma in [0.15, 0.45]')
+    parser.add_argument('--bounded-sigma-wide', action='store_true',
+                       help='Enable wide bounded sigma mode: sigma in [0.1, 0.8]')
     parser.add_argument('--models-output-dir', type=str, default='models',
                        help='Base output directory for trained models (default: models)')
 
@@ -1210,6 +1234,7 @@ def main():
         num_threads=args.num_threads,
         optuna_jobs=args.optuna_jobs,
         bounded_sigma=args.bounded_sigma,
+        bounded_sigma_wide=args.bounded_sigma_wide,
         models_output_dir=args.models_output_dir
     )
 

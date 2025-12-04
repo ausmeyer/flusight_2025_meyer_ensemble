@@ -90,11 +90,9 @@ for (h in 1:4) {
   path <- file.path(root_prefix, sprintf('forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv', h))
   all_forecasts[[paste0('ARIMA_h', h)]] <- load_forecast_quantiles(path, 'ARIMA', h)
 
-  path <- file.path(root_prefix, sprintf('forecasts/retrospective/lgbm_enhanced_t100/TwoStage-FrozenMu_h%d_forecasts.csv', h))
-  all_forecasts[[paste0('LGBM_t100_h', h)]] <- load_forecast_quantiles(path, 'LGBM-t100', h)
-
-  path <- file.path(root_prefix, sprintf('forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h%d_forecasts.csv', h))
-  all_forecasts[[paste0('LGBM_t10_h', h)]] <- load_forecast_quantiles(path, 'LGBM-t10', h)
+  # LGBM Blended (t10+t100+persistence with conformal CIs)
+  path <- file.path(root_prefix, sprintf('forecasts/retrospective/lgbm_blended/LGBM-blended_h%d_forecasts.csv', h))
+  all_forecasts[[paste0('LGBM_blended_h', h)]] <- load_forecast_quantiles(path, 'LGBM-blended', h)
 
   path <- file.path(root_prefix, sprintf('forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h%d_forecasts.csv', h))
   all_forecasts[[paste0('LGBM_bounded_h', h)]] <- load_forecast_quantiles(path, 'LGBM-bounded', h)
@@ -160,8 +158,7 @@ model_colors <- c(
   "FluSight-baseline" = "#555555",
   "ARIMA" = "#1f77b4",
   "SVM" = "#2ca02c",
-  "LGBM-t100" = "#9467bd",
-  "LGBM-t10" = "#8c564b",
+  "LGBM-blended" = "#9467bd",
   "LGBM-bounded" = "#e377c2"
 )
 
@@ -171,8 +168,7 @@ model_fills <- c(
   "FluSight-baseline" = "#999999",
   "ARIMA" = "#7fbfff",
   "SVM" = "#90ee90",
-  "LGBM-t100" = "#c9b3d9",
-  "LGBM-t10" = "#c4a484",
+  "LGBM-blended" = "#c9b3d9",
   "LGBM-bounded" = "#f0b8d0"
 )
 ```

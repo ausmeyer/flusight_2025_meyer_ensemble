@@ -149,13 +149,16 @@ class GaussianFrozenLoc(DistributionClass):
 
 class GaussianFrozenLocBounded(DistributionClass):
     """
-    Bounded version of GaussianFrozenLoc that constrains sigma to [0.1, 0.6].
+    Bounded version of GaussianFrozenLoc that constrains sigma to [0.15, 0.45].
 
     Uses a sigmoid response function instead of exp for the scale parameter,
     which naturally bounds sigma to a reasonable range for log-space forecasting.
 
     This ensures the model learns meaningful uncertainty within the bounded range
     rather than predicting unbounded sigma values that need to be clipped.
+
+    IMPORTANT: This class uses the parent's compute_gradients_and_hessians to ensure
+    autograd correctly handles the bounded sigmoid response function.
     """
     _class_printed = False
 
@@ -184,17 +187,101 @@ class GaussianFrozenLocBounded(DistributionClass):
             loss_fn="nll"
         )
 
-        self.dist_class = Gaussian()
-
     def compute_gradients_and_hessians(self, loss, predt, weights=None):
         """
         Freeze μ gradients completely and only allow σ learning.
+
+        Uses parent class gradient computation to ensure autograd correctly
+        handles the bounded sigmoid response function for scale.
         """
         if not GaussianFrozenLocBounded._class_printed:
             print(f"*** Using GaussianFrozenLocBounded (frozen μ, σ ∈ [{self.sigma_min}, {self.sigma_max}]) ***")
             GaussianFrozenLocBounded._class_printed = True
 
-        grad, hess = self.dist_class.compute_gradients_and_hessians(loss, predt, weights)
+        # Use parent class gradient computation (which uses self.param_dict with bounded sigmoid)
+        grad, hess = super().compute_gradients_and_hessians(loss, predt, weights)
+
+        if grad.ndim == 1 and self.n_dist_param == 2:
+            n_samples = len(grad) // 2
+            grad[:n_samples] = 0.0
+            hess[:n_samples] = 1e-12
+
+        return grad, hess
+
+    def quantile(self, quantiles: list, pred_dist: np.ndarray, **kwargs) -> np.ndarray:
+        """
+        Calculates the quantiles of the distribution using scipy.stats.
+        """
+        from scipy import stats
+
+        if hasattr(pred_dist, 'values'):
+            pred_dist = pred_dist.values
+
+        if pred_dist.ndim == 1:
+            loc, scale = pred_dist[0], pred_dist[1]
+            quantile_preds = stats.norm.ppf(quantiles, loc=loc, scale=scale)
+        else:
+            loc = pred_dist[:, 0]
+            scale = pred_dist[:, 1]
+            scale = np.maximum(scale, 1e-6)
+            quantile_preds = np.array([stats.norm.ppf(quantiles, loc=loc[i], scale=scale[i])
+                                     for i in range(len(loc))])
+
+        return quantile_preds
+
+
+class GaussianFrozenLocBoundedWide(DistributionClass):
+    """
+    Wide-bounded version of GaussianFrozenLoc that constrains sigma to [0.1, 0.8].
+
+    This variant has a wider sigma range than GaussianFrozenLocBounded to allow
+    the model to learn larger uncertainty when the data supports it.
+
+    For log-space forecasting:
+    - sigma=0.3 means ~65% of values within factor of 1.35x
+    - sigma=0.5 means ~65% of values within factor of 1.65x
+    - sigma=0.8 means ~65% of values within factor of 2.23x
+
+    IMPORTANT: This class uses the parent's compute_gradients_and_hessians to ensure
+    autograd correctly handles the bounded sigmoid response function.
+    """
+    _class_printed = False
+
+    def __init__(self, stabilization="MAD", sigma_min=0.1, sigma_max=0.8):
+        from lightgbmlss.distributions.Gaussian import identity_fn, Gaussian_Torch
+
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+
+        bounded_scale_fn = BoundedSigmoidFn(sigma_min, sigma_max)
+
+        distribution = Gaussian_Torch
+        param_dict = {"loc": identity_fn, "scale": bounded_scale_fn}
+
+        super().__init__(
+            distribution=distribution,
+            univariate=True,
+            discrete=False,
+            n_dist_param=len(param_dict),
+            stabilization=stabilization,
+            param_dict=param_dict,
+            distribution_arg_names=list(param_dict.keys()),
+            loss_fn="nll"
+        )
+
+    def compute_gradients_and_hessians(self, loss, predt, weights=None):
+        """
+        Freeze μ gradients completely and only allow σ learning.
+
+        Uses parent class gradient computation to ensure autograd correctly
+        handles the bounded sigmoid response function for scale.
+        """
+        if not GaussianFrozenLocBoundedWide._class_printed:
+            print(f"*** Using GaussianFrozenLocBoundedWide (frozen μ, σ ∈ [{self.sigma_min}, {self.sigma_max}]) ***")
+            GaussianFrozenLocBoundedWide._class_printed = True
+
+        # Use parent class gradient computation (which uses self.param_dict with bounded sigmoid)
+        grad, hess = super().compute_gradients_and_hessians(loss, predt, weights)
 
         if grad.ndim == 1 and self.n_dist_param == 2:
             n_samples = len(grad) // 2

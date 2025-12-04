@@ -46,7 +46,7 @@ try:
     import lightgbmlss
     from lightgbmlss.model import LightGBMLSS
     from lightgbmlss.distributions.Gaussian import Gaussian
-    from utils.distributions import GaussianFrozenLoc, GaussianFrozenLocBounded
+    from utils.distributions import GaussianFrozenLoc, GaussianFrozenLocBounded, GaussianFrozenLocBoundedWide
 except ImportError:
     raise ImportError("lightgbmlss is required. Install with: pip install lightgbmlss")
 
@@ -174,8 +174,11 @@ class ProspectiveForecastGenerator:
         # Detect bounded sigma mode from hyperparameters
         first_location = list(self.hyperparams.keys())[0]
         self.is_bounded = self.hyperparams[first_location].get('bounded_sigma', False)
-        if self.is_bounded:
-            print(f"Model type: BOUNDED SIGMA (log-space quantiles)")
+        self.is_bounded_wide = self.hyperparams[first_location].get('bounded_sigma_wide', False)
+        if self.is_bounded_wide:
+            print(f"Model type: BOUNDED SIGMA WIDE (log-space quantiles, sigma in [0.1, 0.8])")
+        elif self.is_bounded:
+            print(f"Model type: BOUNDED SIGMA (log-space quantiles, sigma in [0.15, 0.45])")
         else:
             print(f"Model type: STANDARD (linear-space quantiles)")
 
@@ -281,7 +284,12 @@ class ProspectiveForecastGenerator:
                 ]).ravel(order='F')
 
                 dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score, params={'verbose': -1})
-                dist = GaussianFrozenLocBounded() if self.is_bounded else GaussianFrozenLoc()
+                if self.is_bounded_wide:
+                    dist = GaussianFrozenLocBoundedWide()
+                elif self.is_bounded:
+                    dist = GaussianFrozenLocBounded()
+                else:
+                    dist = GaussianFrozenLoc()
                 final_stage2 = LightGBMLSS(dist)
                 p2 = stage2_params['best_params'].copy()
                 p2['verbose'] = -1
@@ -336,7 +344,7 @@ class ProspectiveForecastGenerator:
                 # Generate quantile forecasts based on mode
                 from scipy.stats import norm
 
-                if self.is_bounded:
+                if self.is_bounded or self.is_bounded_wide:
                     # BOUNDED MODE: Generate quantiles in log space, then transform back
                     # mu_pred_raw is in log space (because use_log_transform=True for bounded)
                     mu_log = mu_pred_raw
@@ -502,7 +510,7 @@ class ProspectiveForecastGenerator:
         summary_file = os.path.join(output_dir, f"prospective_summary_h{self.horizon}_{timestamp}.csv")
         summary_df.to_csv(summary_file, index=False)
         print(f"  Summary saved to: {summary_file}")
-        
+
         return forecast_file
 
 
@@ -658,7 +666,12 @@ def main():
                 mu_predictions = final_stage1.predict(X_train_transformed)
                 init_score = np.column_stack([mu_predictions, np.zeros_like(mu_predictions)]).ravel(order='F')
                 dtrain2 = lgb.Dataset(X_train_transformed, label=y_train_transformed, init_score=init_score, params={'verbose': -1})
-                dist = GaussianFrozenLocBounded() if generator.is_bounded else GaussianFrozenLoc()
+                if generator.is_bounded_wide:
+                    dist = GaussianFrozenLocBoundedWide()
+                elif generator.is_bounded:
+                    dist = GaussianFrozenLocBounded()
+                else:
+                    dist = GaussianFrozenLoc()
                 final_stage2 = LightGBMLSS(dist)
                 p2 = stage2_params['best_params'].copy(); p2['verbose'] = -1; p2['verbosity'] = -1
                 final_stage2.train(p2, dtrain2, num_boost_round=stage2_params['num_boost_round'])

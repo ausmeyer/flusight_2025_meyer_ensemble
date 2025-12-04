@@ -136,8 +136,8 @@ PY
         echo "  -> Warning: No ensemble output produced for $ASOF"
     fi
 
-    # 4. Cleanup Temp Prospective Files
-    rm -f forecasts/prospective/*_prospective_${TS}.csv
+    # 4. Cleanup Temp Prospective Files - DISABLED to preserve historical files
+    # rm -f forecasts/prospective/*_prospective_${TS}.csv
 
 done
 
