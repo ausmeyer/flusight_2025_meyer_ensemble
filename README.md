@@ -1,98 +1,62 @@
-# Influenza Hospitalizations Ensemble Pipeline (2025)
+# FluSight 2025 Ensemble Forecasts
 
-This repository assembles a weekly ensemble pipeline for forecasting influenza hospitalizations using three model families (ARIMA, SVM, LightGBM-LSS) and a prospective adaptive ensemble.
+This repository contains weekly influenza hospitalization forecasts for the United States, submitted to the CDC FluSight forecasting challenge.
 
-## Weekly Run
+## Forecast Visualization
 
-- Ensure R and Python dependencies are installed (lightgbmlss, pmdarima, sklearn, lightgbm, tidyverse, etc.).
-- Run the full weekly pipeline from the repo root:
+**[View Latest Forecasts](https://ausmeyer.github.io/flusight_2025_meyer_ensemble/)**
 
-```bash
-bash scripts/run_weekly.sh
-```
+The interactive dashboard displays:
+- Forecasts for all 50 US states, Puerto Rico, and national aggregates
+- Multiple model outputs with uncertainty intervals (50% and 95% CI)
+- Ground truth hospitalization data for comparison
 
-What it does:
-- Auto-dates and renders `src/stitch.Rmd` (writes dated ILI/ED/stitched CSVs)
-- Detects the latest stitched file and computes a cutoff = last_date - 8 weeks
-- Generates retrospective forecasts (h=1..4) for ARIMA, LGBM, SVM
-- Generates prospective forecasts (h=1..4) for ARIMA, LGBM, SVM
-- Builds a prospective adaptive ensemble from the last 4 reference weeks’ weights (using up to the last 8 retrospective weeks)
+## Overview
 
-You can control the ensemble lookback and inclusions via flags:
+We generate probabilistic forecasts of weekly incident influenza hospitalizations at 1-4 week horizons for all US states and territories. Our approach combines multiple statistical and machine learning models into an adaptive ensemble.
 
-```bash
-# Use 6-week lookback and 8-week history window; include all models
-bash scripts/run_weekly.sh \
-  --lookback 6 \
-  --history 8 \
-  --include-arima true \
-  --include-svm true \
-  --include-lgbm true
-```
+### Models
 
-## Outputs
+- **ARIMA** - Autoregressive integrated moving average time series model
+- **SVM** - Support vector machine regression
+- **LightGBM** - Gradient boosting with distributional forecasting
+- **AdaptiveEnsemble** - Weighted combination of base models, with weights updated based on recent forecast performance
 
-- Stitched data: `data/imputed_sets/imputed_and_stitched_hosp_<YYYY-MM-DD>.csv`
-- Retrospective forecasts (CDC-style, quantiles only):
-  - `forecasts/retrospective/arima/ARIMA_h{1..4}_forecasts.csv`
-  - `forecasts/retrospective/lgbm_enhanced_t100/TwoStage-FrozenMu_h{1..4}_forecasts.csv` (LGBM t100)
-  - `forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h{1..4}_forecasts.csv` (LGBM t10)
-  - `forecasts/retrospective/svm_retrospective_h{1..4}.csv`
-- Prospective forecasts (CDC-style, quantiles only):
-  - `forecasts/prospective/ARIMA_h{1..4}_prospective_<YYYYMMDD>.csv`
-  - `forecasts/prospective/SVM_h{1..4}_prospective_<YYYYMMDD>.csv`
-  - `forecasts/prospective/TwoStage-FrozenMu-t100_h{1..4}_prospective_<YYYYMMDD>.csv`
-  - `forecasts/prospective/TwoStage-FrozenMu-t10_h{1..4}_prospective_<YYYYMMDD>.csv`
-  - `forecasts/prospective/AdaptiveEnsemble_prospective_<YYYYMMDD>.csv`
+## Forecast Format
 
-Schema (CDC-style):
+Forecasts follow the CDC FluSight hub format:
+
+| Column | Description |
+|--------|-------------|
+| `reference_date` | Date forecast was generated |
+| `target` | `wk inc flu hosp` (weekly incident flu hospitalizations) |
+| `horizon` | Weeks ahead (0-3) |
+| `target_end_date` | End date of the forecast week |
+| `location` | FIPS code or "US" |
+| `output_type` | `quantile` |
+| `output_type_id` | Quantile level (0.01 to 0.99) |
+| `value` | Forecast value |
+
+## Data Sources
+
+- **HHS Protect** - Weekly hospitalization data via healthdata.gov
+- **ILINet** - CDC influenza-like illness surveillance data
+
+## Repository Structure
 
 ```
-reference_date, horizon, target, target_end_date, location, output_type, output_type_id, value
-```
-- `target` is `wk inc flu hosp`
-- `horizon` is zero-based for retrospective files (h-1) and `0` for prospective files (horizons are encoded in filenames)
-- `output_type` is `quantile`; `output_type_id` contains the CDC quantile levels
-
-## LightGBM Model Saving
-
-Prospective LightGBM training saves models (per location, per horizon) to:
-- `models/lgbm_enhanced_t100/point_mu/{location}_h{h}_booster.txt`
-- `models/lgbm_enhanced_t100/scale_sigma/{location}_h{h}_lgbmlss_model.pkl`
-- `models/lgbm_enhanced_t10/point_mu/{location}_h{h}_booster.txt`
-- `models/lgbm_enhanced_t10/scale_sigma/{location}_h{h}_lgbmlss_model.pkl`
-
-Retrospective LGBM generation reads from the corresponding model directories and writes under:
-- `forecasts/retrospective/lgbm_enhanced_t100/`
-- `forecasts/retrospective/lgbm_enhanced_t10/`
-
-## Prospective Ensemble Controls
-
-`src/generate_prosp_adaptive_ensemble.R` supports optional flags:
-
-- `--lookback-weeks <N>` (default: 4)
-- `--history-weeks <N>` (default: 8)
-- `--include-arima <true|false>` (default: true)
-- `--include-svm <true|false>` (default: true)
-- `--include-lgbm <true|false>` (default: true)
-- `--asof-date <YYYY-MM-DD>` (override latest Saturday)
-
-Example (direct call without the weekly runner):
-
-```bash
-Rscript src/generate_prosp_adaptive_ensemble.R \
-  --lookback-weeks 6 --history-weeks 8 \
-  --include-arima true --include-svm true --include-lgbm true
+├── data/                  # Input data files
+├── forecasts/
+│   ├── prospective/       # Weekly submission-ready forecasts
+│   └── retrospective/     # Historical backtesting results
+├── docs/                  # GitHub Pages visualization
+└── src/                   # Model and pipeline code
 ```
 
-## Helpers
+## Authors
 
-- `src/utils/pipeline_utils.py` provides:
-  - `find_latest_imputed()` – latest `imputed_and_stitched_hosp_*.csv`
-  - `last_and_cutoff_dates(data_file, weeks=8)` – computes last date and cutoff
+Santillana Lab, Harvard University
 
-## Notes
+## License
 
-- `src/stitch.Rmd` automatically sets the as-of date to the most recent Saturday and writes dated outputs.
-- All model generators accept explicit `--data-file` overrides if needed.
-- Retrospective SVM outputs are standardized to the CDC 8-column format.
+This project is for research purposes. Forecast outputs are publicly available for use with appropriate attribution.

@@ -64,17 +64,28 @@ const DataLoader = {
         }
     },
 
+    // GitHub repository info for raw file access
+    githubOwner: 'ausmeyer',
+    githubRepo: 'flusight_2025_meyer_ensemble',
+    githubBranch: 'main',
+
     /**
      * Get the base URL for data files
      * Works both locally and on GitHub Pages
      */
     getBaseUrl() {
+        const hostname = window.location.hostname;
+
+        // If running on GitHub Pages, use raw.githubusercontent.com
+        if (hostname.includes('github.io')) {
+            return `https://raw.githubusercontent.com/${this.githubOwner}/${this.githubRepo}/${this.githubBranch}`;
+        }
+
+        // Local development - go up from /docs/
         const pathname = window.location.pathname;
-        // If we're in /docs/, go up one level
         if (pathname.includes('/docs/')) {
             return pathname.replace(/\/docs\/.*$/, '');
         }
-        // GitHub Pages usually serves from root or repo name
         return '';
     },
 
