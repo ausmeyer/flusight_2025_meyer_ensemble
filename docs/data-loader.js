@@ -71,22 +71,22 @@ const DataLoader = {
 
     /**
      * Get the base URL for data files
-     * Works both locally and on GitHub Pages
+     * Works both locally and on GitHub Pages / custom domains
      */
     getBaseUrl() {
         const hostname = window.location.hostname;
 
-        // If running on GitHub Pages, use raw.githubusercontent.com
-        if (hostname.includes('github.io')) {
-            return `https://raw.githubusercontent.com/${this.githubOwner}/${this.githubRepo}/${this.githubBranch}`;
+        // Local development (localhost or 127.0.0.1)
+        if (hostname === 'localhost' || hostname === '127.0.0.1') {
+            const pathname = window.location.pathname;
+            if (pathname.includes('/docs/')) {
+                return pathname.replace(/\/docs\/.*$/, '');
+            }
+            return '';
         }
 
-        // Local development - go up from /docs/
-        const pathname = window.location.pathname;
-        if (pathname.includes('/docs/')) {
-            return pathname.replace(/\/docs\/.*$/, '');
-        }
-        return '';
+        // Any hosted environment (GitHub Pages, custom domain, etc.) - use raw GitHub
+        return `https://raw.githubusercontent.com/${this.githubOwner}/${this.githubRepo}/${this.githubBranch}`;
     },
 
     /**
