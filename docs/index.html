@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prospective Forecast Visualization</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <h2>Prospective Forecast Visualization</h2>
+
+            <div class="control-group">
+                <label>Select Models:</label>
+                <div id="model-checkboxes" class="checkbox-group"></div>
+            </div>
+
+            <hr>
+
+            <div class="control-group">
+                <label for="state-select">Select States:</label>
+                <select id="state-select" multiple>
+                    <!-- Populated by JS -->
+                </select>
+                <button id="clear-states" class="btn-small">Clear Selection</button>
+            </div>
+
+            <hr>
+
+            <div class="control-group checkbox-group">
+                <label>
+                    <input type="checkbox" id="show-median" checked>
+                    Show Median
+                </label>
+                <label>
+                    <input type="checkbox" id="show-50ci" checked>
+                    Show 50% CI
+                </label>
+                <label>
+                    <input type="checkbox" id="show-95ci" checked>
+                    Show 95% CI
+                </label>
+            </div>
+
+            <hr>
+
+            <div class="info-section">
+                <p><span class="legend-line black"></span> Ground Truth</p>
+                <p>Forecast Date: <span id="forecast-date">Loading...</span></p>
+                <p>Generated: <span id="generated-date"></span></p>
+                <p>Models found: <span id="model-count">0</span></p>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Tab Navigation -->
+            <nav class="tab-nav">
+                <button class="tab-btn active" data-tab="states">State Forecasts</button>
+                <button class="tab-btn" data-tab="us">US National</button>
+                <button class="tab-btn" data-tab="pr">Puerto Rico</button>
+            </nav>
+
+            <!-- Tab Content -->
+            <div class="tab-content">
+                <div id="states-tab" class="tab-panel active">
+                    <div id="state-charts-container" class="charts-grid">
+                        <div class="loading">Loading forecasts...</div>
+                    </div>
+                </div>
+
+                <div id="us-tab" class="tab-panel">
+                    <div class="single-chart-container">
+                        <canvas id="us-chart"></canvas>
+                    </div>
+                </div>
+
+                <div id="pr-tab" class="tab-panel">
+                    <div class="single-chart-container">
+                        <canvas id="pr-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="data-loader.js"></script>
+    <script src="chart-utils.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
