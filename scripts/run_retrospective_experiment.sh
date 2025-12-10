@@ -15,11 +15,13 @@ ENSEMBLE_LOOKBACK_WEEKS=""
 ENSEMBLE_HISTORY_WEEKS=""
 ENSEMBLE_INCLUDE_ARIMA=""
 ENSEMBLE_INCLUDE_SVM=""
-ENSEMBLE_INCLUDE_LGBM=""
+ENSEMBLE_INCLUDE_LGBM_BLENDED=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --lookback) 
+    --lookback)
       ENSEMBLE_LOOKBACK_WEEKS="$2"; shift 2;;
     --history)
       ENSEMBLE_HISTORY_WEEKS="$2"; shift 2;;
@@ -27,8 +29,12 @@ while [[ $# -gt 0 ]]; do
       ENSEMBLE_INCLUDE_ARIMA="$2"; shift 2;;
     --include-svm)
       ENSEMBLE_INCLUDE_SVM="$2"; shift 2;;
-    --include-lgbm)
-      ENSEMBLE_INCLUDE_LGBM="$2"; shift 2;;
+    --include-lgbm-blended)
+      ENSEMBLE_INCLUDE_LGBM_BLENDED="$2"; shift 2;;
+    --include-lgbm-bounded)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED="$2"; shift 2;;
+    --include-lgbm-bounded-wide)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE="$2"; shift 2;;
     *)
       shift;;
   esac
@@ -50,6 +56,7 @@ mkdir -p forecasts/retrospective/arima
 mkdir -p forecasts/retrospective/lgbm_enhanced_t100
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded
+mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide
 mkdir -p forecasts/retrospective/svm_t100
 mkdir -p forecasts/retrospective/ensemble
 mkdir -p forecasts/prospective # Ensure exists for temp files
@@ -70,9 +77,14 @@ python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF
   --models-dir models/lgbm_enhanced_t10 --models-base-dir models/lgbm_enhanced_t10 \
   --output-base forecasts/retrospective
 
-echo "--> LGBM (t100 bounded)"
+echo "--> LGBM (t10 bounded)"
 python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
   --models-dir models/lgbm_enhanced_t10_bounded --models-base-dir models/lgbm_enhanced_t10_bounded \
+  --output-base forecasts/retrospective
+
+echo "--> LGBM (t10 bounded wide)"
+python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF" \
+  --models-dir models/lgbm_enhanced_t10_bounded_wide --models-base-dir models/lgbm_enhanced_t10_bounded_wide \
   --output-base forecasts/retrospective
 
 echo "--> SVM"
@@ -93,7 +105,9 @@ if [[ -n "$ENSEMBLE_LOOKBACK_WEEKS" ]]; then AE_ARGS+=(--lookback-weeks "$ENSEMB
 if [[ -n "$ENSEMBLE_HISTORY_WEEKS" ]]; then AE_ARGS+=(--history-weeks "$ENSEMBLE_HISTORY_WEEKS"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_ARIMA" ]]; then AE_ARGS+=(--include-arima "$ENSEMBLE_INCLUDE_ARIMA"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_SVM" ]]; then AE_ARGS+=(--include-svm "$ENSEMBLE_INCLUDE_SVM"); fi
-if [[ -n "$ENSEMBLE_INCLUDE_LGBM" ]]; then AE_ARGS+=(--include-lgbm "$ENSEMBLE_INCLUDE_LGBM"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BLENDED" ]]; then AE_ARGS+=(--include-lgbm-blended "$ENSEMBLE_INCLUDE_LGBM_BLENDED"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED" ]]; then AE_ARGS+=(--include-lgbm-bounded "$ENSEMBLE_INCLUDE_LGBM_BOUNDED"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE"); fi
 
 # Generate list of As-Of dates (Saturdays) from Cutoff to now
 DATES=$(python - <<PY
@@ -151,6 +165,10 @@ for h in h_list:
     tasks.append({
         'src': f'forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h{h}_forecasts.csv',
         'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded_h{h}_prospective_{ts}.csv'
+    })
+    tasks.append({
+        'src': f'forecasts/retrospective/lgbm_enhanced_t10_bounded_wide/TwoStage-FrozenMu_h{h}_forecasts.csv',
+        'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded-wide_h{h}_prospective_{ts}.csv'
     })
 
 files_created = 0

@@ -13,9 +13,10 @@ args <- commandArgs(trailingOnly = TRUE)
 LOOKBACK_WEEKS <- 3  # EWMA span for weighting (aggressive decay toward recent weeks)
 HISTORY_WEEKS  <- 6  # Consider last 6 weeks of history
 INCLUDE_ARIMA <- TRUE
-INCLUDE_SVM   <- FALSE  # Disabled - not tracking trend well
+INCLUDE_SVM   <- FALSE
 INCLUDE_LGBM_BLENDED <- TRUE
 INCLUDE_LGBM_BOUNDED <- TRUE
+INCLUDE_LGBM_BOUNDED_WIDE <- TRUE
 AS_OF_OVERRIDE <- NA_character_
 
 i <- 1
@@ -28,6 +29,7 @@ while (i <= length(args)) {
   if (key == '--include-svm')    { INCLUDE_SVM    <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--include-lgbm-blended') { INCLUDE_LGBM_BLENDED <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--include-lgbm-bounded') { INCLUDE_LGBM_BOUNDED <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
+  if (key == '--include-lgbm-bounded-wide') { INCLUDE_LGBM_BOUNDED_WIDE <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--asof-date')      { AS_OF_OVERRIDE <- val; i <- i + 2; next }
   i <- i + 1
 }
@@ -328,6 +330,7 @@ load_retro_for_h <- function(h) {
   arima_path <- file.path('forecasts/retrospective/arima', sprintf('ARIMA_h%d_forecasts.csv', h))
   lgbm_blended_path <- file.path('forecasts/retrospective/lgbm_blended', sprintf('LGBM-blended_h%d_forecasts.csv', h))
   lgbm_bounded_path <- file.path('forecasts/retrospective/lgbm_enhanced_t10_bounded', sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
+  lgbm_bounded_wide_path <- file.path('forecasts/retrospective/lgbm_enhanced_t10_bounded_wide', sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
   svm_glob   <- list.files('forecasts/retrospective/svm_t100', pattern = sprintf('^svm.*_h%d.*\\.csv$', h), full.names = TRUE, ignore.case = TRUE)
 
   if (INCLUDE_ARIMA && file.exists(arima_path)) {
@@ -338,6 +341,9 @@ load_retro_for_h <- function(h) {
   }
   if (INCLUDE_LGBM_BOUNDED && file.exists(lgbm_bounded_path)) {
     lst$LGBM_bounded <- read_csv(lgbm_bounded_path, show_col_types = FALSE)
+  }
+  if (INCLUDE_LGBM_BOUNDED_WIDE && file.exists(lgbm_bounded_wide_path)) {
+    lst$LGBM_bounded_wide <- read_csv(lgbm_bounded_wide_path, show_col_types = FALSE)
   }
   if (INCLUDE_SVM && length(svm_glob) > 0) {
     # prefer a single main SVM file; otherwise combine
@@ -370,6 +376,12 @@ load_prosp_for_h <- function(h, ts) {
   lgbm_bounded_fp <- file.path(pdir, sprintf('TwoStage-FrozenMu-bounded_h%d_prospective_%s.csv', h, ts))
   if (INCLUDE_LGBM_BOUNDED && file.exists(lgbm_bounded_fp)) {
     lst$LGBM_bounded <- read_csv(lgbm_bounded_fp, show_col_types = FALSE)
+  }
+
+  # LGBM Bounded Wide (wider sigma range [0.1, 0.8])
+  lgbm_bounded_wide_fp <- file.path(pdir, sprintf('TwoStage-FrozenMu-bounded-wide_h%d_prospective_%s.csv', h, ts))
+  if (INCLUDE_LGBM_BOUNDED_WIDE && file.exists(lgbm_bounded_wide_fp)) {
+    lst$LGBM_bounded_wide <- read_csv(lgbm_bounded_wide_fp, show_col_types = FALSE)
   }
   lst
 }

@@ -25,6 +25,7 @@ ENSEMBLE_INCLUDE_ARIMA=""
 ENSEMBLE_INCLUDE_SVM=""
 ENSEMBLE_INCLUDE_LGBM_BLENDED=""
 ENSEMBLE_INCLUDE_LGBM_BOUNDED=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +41,8 @@ while [[ $# -gt 0 ]]; do
       ENSEMBLE_INCLUDE_LGBM_BLENDED="$2"; shift 2;;
     --include-lgbm-bounded)
       ENSEMBLE_INCLUDE_LGBM_BOUNDED="$2"; shift 2;;
+    --include-lgbm-bounded-wide)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE="$2"; shift 2;;
     *)
       shift;;
   esac
@@ -97,6 +100,7 @@ echo "Cutoff (season, for ARIMA/blended residuals): $CUTOFF_SEASON"
 mkdir -p forecasts/retrospective/arima
 mkdir -p forecasts/retrospective/lgbm_blended
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded
+mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide
 mkdir -p forecasts/retrospective/svm_t100
 mkdir -p forecasts/prospective
 
@@ -119,25 +123,28 @@ python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF
   --models-dir models/lgbm_enhanced_t10_bounded --models-base-dir models/lgbm_enhanced_t10_bounded \
   --output-base forecasts/retrospective
 
-# SVM disabled - not tracking trend well
-# echo "==> Retrospective SVM (h=1..4)"
-# for H in 1 2 3 4; do
-#   python src/generate_retro_svm.py \
-#     --hyperparams models/svm_t100/svm_hyperparameters_h${H}_t100.pkl \
-#     --data-file "$STITCHED" \
-#     --cut-off "$CUTOFF" \
-#     --output forecasts/retrospective/svm_t100 \
-#     --max-weeks 0 || true
-# done
+echo "==> Retrospective LGBM Bounded Wide (using recent cutoff)"
+python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF_RECENT" \
+  --models-dir models/lgbm_enhanced_t10_bounded_wide --models-base-dir models/lgbm_enhanced_t10_bounded_wide \
+  --output-base forecasts/retrospective
+
+echo "==> Retrospective SVM (h=1..4)"
+for H in 1 2 3 4; do
+  python src/generate_retro_svm.py \
+    --hyperparams models/svm_t100/svm_hyperparameters_h${H}_t100.pkl \
+    --data-file "$STITCHED" \
+    --cut-off "$CUTOFF_SEASON" \
+    --output forecasts/retrospective/svm_t100 \
+    --max-weeks 0 || true
+done
 
 echo "==> Prospective ARIMA (h=1..4)"
 python src/generate_prosp_arima.py --data-file "$STITCHED" \
   --residuals-dir forecasts/retrospective/arima \
   --output forecasts/prospective
 
-# SVM disabled - not tracking trend well
-# echo "==> Prospective SVM (h=1..4)"
-# python src/generate_prosp_svm.py --data-file "$STITCHED" --models models/svm_t100 --output forecasts/prospective
+echo "==> Prospective SVM (h=1..4)"
+python src/generate_prosp_svm.py --data-file "$STITCHED" --models models/svm_t100 --output forecasts/prospective
 
 echo "==> Prospective Blended LGBM (t10+t100+persistence -> conformal CIs)"
 python src/generate_blended_lgbm.py \
@@ -161,6 +168,18 @@ for H in 1 2 3 4; do
     --models-output-dir models/lgbm_enhanced_t10_bounded || true
 done
 
+echo "==> Prospective LGBM Bounded Wide (h=1..4)"
+for H in 1 2 3 4; do
+  python src/generate_prosp_lgbm.py \
+    --hyperparams models/lgbm_enhanced_t10_bounded_wide/two_stage_hyperparameters_h${H}.pkl \
+    --data-file "$STITCHED" \
+    --horizon ${H} \
+    --output forecasts/prospective \
+    --model-name TwoStage-FrozenMu-bounded-wide \
+    --save-models \
+    --models-output-dir models/lgbm_enhanced_t10_bounded_wide || true
+done
+
 echo "==> Prospective Adaptive Ensemble"
 # Align ensemble as-of date with the reference date used by prospective generators
 PROSP_ASOF=$(python - <<PY
@@ -177,6 +196,7 @@ if [[ -n "$ENSEMBLE_INCLUDE_ARIMA" ]]; then AE_ARGS+=(--include-arima "$ENSEMBLE
 if [[ -n "$ENSEMBLE_INCLUDE_SVM" ]]; then AE_ARGS+=(--include-svm "$ENSEMBLE_INCLUDE_SVM"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BLENDED" ]]; then AE_ARGS+=(--include-lgbm-blended "$ENSEMBLE_INCLUDE_LGBM_BLENDED"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED" ]]; then AE_ARGS+=(--include-lgbm-bounded "$ENSEMBLE_INCLUDE_LGBM_BOUNDED"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE"); fi
 Rscript src/generate_prosp_adaptive_ensemble.R "${AE_ARGS[@]}"
 
 echo "==> Done. Outputs under forecasts/{retrospective,prospective}"

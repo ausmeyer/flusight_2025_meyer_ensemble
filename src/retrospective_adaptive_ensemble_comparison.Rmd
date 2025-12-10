@@ -34,7 +34,7 @@ Generated on: `r Sys.time()`
 # Retrospective WIS Evaluation (Pipeline Outputs)
 
 ```{r pipeline-wis}
-EVAL_START <- as.Date('2024-10-01')
+EVAL_START <- as.Date('2025-11-01')
 
 # Helper: latest file in a directory by pattern
 latest_file <- function(dir, pattern) {
@@ -247,7 +247,7 @@ per_horizon_summary <- wis_by_model %>%
   ungroup() %>%
   arrange(h, is.na(relative_wis), relative_wis)
 
-cat("\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (>= 2024-10-01):\n\n")
+cat("\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (>= 2025-11-01):\n\n")
 print(knitr::kable(per_horizon_summary, digits = 4))
 
 # Combined across horizons
