@@ -11,9 +11,9 @@
 
 <meta name="author" content="Pipeline Evaluation" />
 
-<meta name="date" content="2025-12-07" />
+<meta name="date" content="2025-12-13" />
 
-<title>Retrospective WIS Evaluation (Pipeline Outputs)</title>
+<title>Retrospective WIS Evaluation</title>
 
 <script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
 // be compatible with the behavior of Pandoc < 2.8).
@@ -456,20 +456,30 @@ display: none;
 
 
 
-<h1 class="title toc-ignore">Retrospective WIS Evaluation (Pipeline
-Outputs)</h1>
-<h3 class="subtitle">Per-horizon and combined WIS and relative WIS since
-2024-10-01</h3>
+<h1 class="title toc-ignore">Retrospective WIS Evaluation</h1>
+<h3 class="subtitle">Per-horizon and combined WIS comparison of base
+models</h3>
 <h4 class="author">Pipeline Evaluation</h4>
-<h4 class="date">2025-12-07</h4>
+<h4 class="date">2025-12-13</h4>
 
 </div>
 
 
-<p>Generated on: 2025-12-07 12:17:11.989994</p>
-<div id="retrospective-wis-evaluation-pipeline-outputs" class="section level1">
-<h1>Retrospective WIS Evaluation (Pipeline Outputs)</h1>
-<pre class="r"><code>EVAL_START &lt;- as.Date(&#39;2025-11-01&#39;)
+<p>Generated on: 2025-12-13 13:20:37.612574</p>
+<div id="retrospective-wis-evaluation" class="section level1">
+<h1>Retrospective WIS Evaluation</h1>
+<pre class="r"><code># Per-horizon evaluation start dates based on first forecast with ground truth
+# Reference date 2025-11-15 produces:
+#   h1 (CDC h0) target_end_date = 2025-11-22
+#   h2 (CDC h1) target_end_date = 2025-11-29
+#   h3 (CDC h2) target_end_date = 2025-12-06
+#   h4 (CDC h3) target_end_date = 2025-12-13
+EVAL_START_BY_HORIZON &lt;- c(
+  `1` = as.Date(&#39;2025-11-22&#39;),
+  `2` = as.Date(&#39;2025-11-29&#39;),
+  `3` = as.Date(&#39;2025-12-06&#39;),
+  `4` = as.Date(&#39;2025-12-13&#39;)
+)
 
 # Helper: latest file in a directory by pattern
 latest_file &lt;- function(dir, pattern) {
@@ -494,12 +504,9 @@ location_to_fips &lt;- c(
   &#39;Washington&#39;=&#39;53&#39;,&#39;West Virginia&#39;=&#39;54&#39;,&#39;Wisconsin&#39;=&#39;55&#39;,&#39;Wyoming&#39;=&#39;56&#39;,&#39;US&#39;=&#39;US&#39;
 )
 
-actual_data_full &lt;- actual_raw %&gt;%
+actual_data &lt;- actual_raw %&gt;%
   transmute(location = location_to_fips[location_name], date = as.Date(date), actual_value = total_hosp) %&gt;%
   filter(!is.na(location))
-
-# For evaluation summaries only (not used for weighting), restrict to EVAL_START+
-actual_data &lt;- actual_data_full %&gt;% filter(date &gt;= EVAL_START)
 
 # Load model retrospective files for h=1..4
 load_model &lt;- function(path, model_name, h){
@@ -513,121 +520,90 @@ load_model &lt;- function(path, model_name, h){
 
 all_models &lt;- list()
 for (h in 1:4) {
-  baseline_path &lt;- sprintf(&#39;../forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv&#39;, h)
-  baseline &lt;- load_model(baseline_path, &#39;FluSight-baseline&#39;, h)
+  baseline &lt;- load_model(sprintf(&#39;../forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv&#39;, h), &#39;FluSight-baseline&#39;, h)
   arima &lt;- load_model(sprintf(&#39;../forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv&#39;, h), &#39;ARIMA&#39;, h)
-  lgbm_t100  &lt;- load_model(sprintf(&#39;../forecasts/retrospective/lgbm_enhanced_t100/TwoStage-FrozenMu_h%d_forecasts.csv&#39;, h), &#39;LGBM_t100&#39;, h)
-  lgbm_t10   &lt;- load_model(sprintf(&#39;../forecasts/retrospective/lgbm_enhanced_t10/TwoStage-FrozenMu_h%d_forecasts.csv&#39;, h),  &#39;LGBM_t10&#39;, h)
-  svm   &lt;- load_model(sprintf(&#39;../forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv&#39;, h), &#39;SVM&#39;, h)
-  dfs &lt;- list(baseline, arima, lgbm_t100, lgbm_t10, svm)
+  lgbm_blended &lt;- load_model(sprintf(&#39;../forecasts/retrospective/lgbm_blended/LGBM-blended_h%d_forecasts.csv&#39;, h), &#39;LGBM_blended&#39;, h)
+  lgbm_bounded &lt;- load_model(sprintf(&#39;../forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h%d_forecasts.csv&#39;, h), &#39;LGBM_bounded&#39;, h)
+  lgbm_bounded_wide &lt;- load_model(sprintf(&#39;../forecasts/retrospective/lgbm_enhanced_t10_bounded_wide/TwoStage-FrozenMu_h%d_forecasts.csv&#39;, h), &#39;LGBM_bounded_wide&#39;, h)
+  svm &lt;- load_model(sprintf(&#39;../forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv&#39;, h), &#39;SVM&#39;, h)
+  dfs &lt;- list(baseline, arima, lgbm_blended, lgbm_bounded, lgbm_bounded_wide, svm)
   dfs &lt;- dfs[!sapply(dfs, is.null)]
   if (length(dfs) &gt; 0) all_models[[paste0(&#39;h&#39;, h)]] &lt;- bind_rows(dfs)
+}
+
+# Load AdaptiveEnsemble from multiple retrospective files
+# Ensemble uses CDC horizon convention (0-3), we need to convert to internal (1-4)
+ensemble_files &lt;- list.files(&#39;../forecasts/retrospective/ensemble&#39;, pattern = &#39;^AdaptiveEnsemble_retrospective_.*\\.csv$&#39;, full.names = TRUE)
+if (length(ensemble_files) &gt; 0) {
+  ensemble_list &lt;- lapply(ensemble_files, function(f) {
+    df &lt;- read_csv(f, show_col_types = FALSE)
+    df &lt;- df %&gt;%
+      filter(output_type == &#39;quantile&#39;) %&gt;%
+      mutate(
+        model = &#39;AdaptiveEnsemble&#39;,
+        h = as.integer(horizon) + 1,  # Convert CDC horizon (0-3) to internal (1-4)
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date)
+      )
+    df
+  })
+  ensemble_all &lt;- bind_rows(ensemble_list)
+
+  # Add ensemble to all_models by horizon
+  for (h in 1:4) {
+    ens_h &lt;- ensemble_all %&gt;% filter(h == !!h)
+    if (nrow(ens_h) &gt; 0) {
+      if (paste0(&#39;h&#39;, h) %in% names(all_models)) {
+        all_models[[paste0(&#39;h&#39;, h)]] &lt;- bind_rows(all_models[[paste0(&#39;h&#39;, h)]], ens_h)
+      } else {
+        all_models[[paste0(&#39;h&#39;, h)]] &lt;- ens_h
+      }
+    }
+  }
 }
 
 stopifnot(length(all_models) &gt; 0)
 ret_all &lt;- bind_rows(all_models)
 
-# WIS function (log scale) used for weighting and evaluation
+# WIS function (standard scale, matching scoringutils/hubEvals)
 calculate_wis_single &lt;- function(qvals, qlevels, actual_value){
+  if (length(actual_value) == 0 || all(is.na(actual_value))) return(NA_real_)
   qv &lt;- as.numeric(qvals)
   ql &lt;- as.numeric(qlevels)
-  alog &lt;- log(as.numeric(actual_value) + 1)
-  if (!is.finite(alog)) return(NA_real_)
+  y &lt;- as.numeric(actual_value)[1]
+  if (!is.finite(y)) return(NA_real_)
   keep &lt;- is.finite(qv) &amp; is.finite(ql)
   qv &lt;- qv[keep]; ql &lt;- ql[keep]
   if (length(qv) == 0 || length(ql) == 0) return(NA_real_)
+
+  # Get unique alpha levels (for symmetric intervals)
   alphas &lt;- unique(c(ql[ql &lt;= 0.5], 1 - ql[ql &gt; 0.5]))
   alphas &lt;- alphas[is.finite(alphas) &amp; alphas &gt; 0]
   if (length(alphas) == 0) return(NA_real_)
-  qlog &lt;- log(pmax(qv, 0) + 1)
+
   scores &lt;- sapply(alphas, function(a){
     li &lt;- suppressWarnings(which.min(abs(ql - a)))
     ui &lt;- suppressWarnings(which.min(abs(ql - (1 - a))))
     if (length(li) == 0 || length(ui) == 0 || is.na(li) || is.na(ui)) return(NA_real_)
-    L &lt;- qlog[li]; U &lt;- qlog[ui]
+    L &lt;- qv[li]; U &lt;- qv[ui]
     if (!is.finite(L) || !is.finite(U)) return(NA_real_)
     width &lt;- U - L
-    pen &lt;- if (is.finite(alog) &amp;&amp; alog &lt; L) (2/a) * (L - alog) else if (is.finite(alog) &amp;&amp; alog &gt; U) (2/a) * (alog - U) else 0
-    if (is.finite(width) &amp;&amp; is.finite(pen)) width + pen else NA_real_
+    pen &lt;- if (y &lt; L) (2/a) * (L - y) else if (y &gt; U) (2/a) * (y - U) else 0
+    if (is.finite(width) &amp;&amp; is.finite(pen)) (a/2) * (width + pen) else NA_real_
   })
-  if (all(is.na(scores))) NA_real_ else mean(scores, na.rm = TRUE)
+  if (all(is.na(scores))) NA_real_ else sum(scores, na.rm = TRUE)
 }
 
-# Build retrospective AdaptiveEnsemble from ARIMA/LGBM_t100/LGBM_t10/SVM using prior 4 weeks per horizon
-build_weights &lt;- function(df_h, ref_date, lookback_weeks = 4) {
-  # df_h: rows for a single horizon with columns: model, reference_date, target_end_date, location, output_type, output_type_id, value
-  # Use only ARIMA/LGBM_t100/LGBM_t10/SVM
-  cand &lt;- df_h %&gt;% filter(model %in% c(&#39;ARIMA&#39;,&#39;LGBM_t100&#39;,&#39;LGBM_t10&#39;,&#39;SVM&#39;), output_type==&#39;quantile&#39;)
-  prev_refs &lt;- sort(unique(cand$reference_date))
-  prev_refs &lt;- prev_refs[prev_refs &lt; ref_date]
-  if (length(prev_refs) == 0) return(setNames(rep(1/4, 4), c(&#39;ARIMA&#39;,&#39;LGBM_t100&#39;,&#39;LGBM_t10&#39;,&#39;SVM&#39;)))
-  eval_refs &lt;- tail(prev_refs, lookback_weeks)
-  # Compute WIS per model over eval_refs
-  wis_by_model &lt;- cand %&gt;%
-    filter(reference_date %in% eval_refs) %&gt;%
-    mutate(output_type_id = as.numeric(output_type_id)) %&gt;%
-    group_by(model, reference_date, target_end_date, location) %&gt;%
-    summarise(quantile_values = list(value), quantile_levels = list(output_type_id), .groups=&#39;drop&#39;) %&gt;%
-    # Use full history so weights can be computed just before EVAL_START
-    left_join(actual_data_full, by=c(&#39;target_end_date&#39;=&#39;date&#39;,&#39;location&#39;=&#39;location&#39;)) %&gt;%
-    filter(!is.na(actual_value)) %&gt;%
-    rowwise() %&gt;%
-    mutate(wis = calculate_wis_single(unlist(quantile_values), unlist(quantile_levels), actual_value)) %&gt;%
-    ungroup() %&gt;%
-    group_by(model) %&gt;%
-    summarise(mean_wis = mean(wis, na.rm=TRUE), .groups=&#39;drop&#39;)
-  models &lt;- intersect(c(&#39;ARIMA&#39;,&#39;LGBM_t100&#39;,&#39;LGBM_t10&#39;,&#39;SVM&#39;), wis_by_model$model)
-  if (length(models) == 0 || any(!is.finite(wis_by_model$mean_wis))) {
-    return(setNames(rep(1/4, 4), c(&#39;ARIMA&#39;,&#39;LGBM_t100&#39;,&#39;LGBM_t10&#39;,&#39;SVM&#39;)))
-  }
-  inv &lt;- 1 / wis_by_model$mean_wis
-  w &lt;- inv / sum(inv)
-  out &lt;- setNames(rep(0, 4), c(&#39;ARIMA&#39;,&#39;LGBM_t100&#39;,&#39;LGBM_t10&#39;,&#39;SVM&#39;))
-  out[wis_by_model$model] &lt;- w
-  out
-}
-
-build_ensemble_for_h &lt;- function(ret_h) {
-  # ret_h: rows for a single horizon across all models (including baseline)
-  # We will produce model == &#39;AdaptiveEnsemble&#39; rows using ARIMA/LGBM_t100/LGBM_t10/SVM only
-  cand &lt;- ret_h %&gt;% filter(model %in% c(&#39;ARIMA&#39;,&#39;LGBM_t100&#39;,&#39;LGBM_t10&#39;,&#39;SVM&#39;), output_type==&#39;quantile&#39;)
-  if (nrow(cand) == 0) return(NULL)
-  ref_dates &lt;- sort(unique(cand$reference_date))
-  ens_list &lt;- list()
-  for (rd in ref_dates) {
-    w &lt;- build_weights(ret_h, rd, lookback_weeks = 4)
-    # Combine forecasts at this ref date across models using weights
-    comb &lt;- cand %&gt;%
-      filter(reference_date == rd) %&gt;%
-      mutate(w = case_when(model==&#39;ARIMA&#39; ~ w[&#39;ARIMA&#39;], model==&#39;LGBM_t100&#39; ~ w[&#39;LGBM_t100&#39;], model==&#39;LGBM_t10&#39; ~ w[&#39;LGBM_t10&#39;], model==&#39;SVM&#39; ~ w[&#39;SVM&#39;], TRUE ~ 0)) %&gt;%
-      group_by(reference_date, target_end_date, location, output_type_id) %&gt;%
-      summarise(value = ifelse(sum(w, na.rm=TRUE) &gt; 0, sum(value * w, na.rm=TRUE) / sum(w, na.rm=TRUE), mean(value, na.rm=TRUE)), .groups=&#39;drop&#39;) %&gt;%
-      mutate(output_type = &#39;quantile&#39;, model = &#39;AdaptiveEnsemble&#39;)
-    ens_list[[as.character(rd)]] &lt;- comb
-  }
-  bind_rows(ens_list)
-}
-
-ens_all &lt;- list()
-for (h in sort(unique(ret_all$h))) {
-  ret_h &lt;- ret_all %&gt;% filter(h == !!h)
-  ens_h &lt;- build_ensemble_for_h(ret_h)
-  if (!is.null(ens_h) &amp;&amp; nrow(ens_h) &gt; 0) {
-    ens_h$h &lt;- h
-    ens_all[[paste0(&#39;h&#39;, h)]] &lt;- ens_h
-  }
-}
-
-ens_all_df &lt;- if (length(ens_all) &gt; 0) bind_rows(ens_all) else NULL
-
-retros &lt;- if (!is.null(ens_all_df)) bind_rows(ret_all, ens_all_df) else ret_all
-retros &lt;- retros %&gt;% filter(as.Date(target_end_date) &gt;= EVAL_START)
-
-# Compute WIS per horizon
+# Compute WIS per horizon with horizon-specific start dates
 wis_scores_all &lt;- list()
-for (h in sort(unique(retros$h))) {
-  dfh &lt;- retros %&gt;% filter(h == !!h, output_type == &#39;quantile&#39;) %&gt;% mutate(output_type_id = as.numeric(output_type_id))
+for (h in sort(unique(ret_all$h))) {
+  eval_start_h &lt;- EVAL_START_BY_HORIZON[as.character(h)]
+
+  dfh &lt;- ret_all %&gt;%
+    filter(h == !!h, output_type == &#39;quantile&#39;, as.Date(target_end_date) &gt;= eval_start_h) %&gt;%
+    mutate(output_type_id = as.numeric(output_type_id))
   if (nrow(dfh) == 0) next
+
   wis_scores &lt;- dfh %&gt;%
     group_by(h, model, reference_date, target_end_date, location) %&gt;%
     summarise(quantile_values = list(value), quantile_levels = list(output_type_id), .groups = &#39;drop&#39;) %&gt;%
@@ -657,31 +633,28 @@ for (hh in sort(unique(wis_scores_all_df$h))) {
 
 wis_scores_common &lt;- bind_rows(wis_common_list)
 
-cat(&quot;\nDEBUG INFO:\n&quot;)</code></pre>
+cat(&quot;\nEVALUATION INFO:\n&quot;)</code></pre>
 <pre><code>## 
-## DEBUG INFO:</code></pre>
-<pre class="r"><code>cat(&quot;EVAL_START:&quot;, as.character(EVAL_START), &quot;\n&quot;)</code></pre>
-<pre><code>## EVAL_START: 2025-11-01</code></pre>
-<pre class="r"><code>cat(&quot;Available dates per model (min/max):\n&quot;)</code></pre>
-<pre><code>## Available dates per model (min/max):</code></pre>
-<pre class="r"><code>print(wis_scores_all_df %&gt;% group_by(model) %&gt;% summarise(start=min(target_end_date), end=max(target_end_date), n=n()))</code></pre>
-<pre><code>## # A tibble: 6 × 4
-##   model             start      end            n
-##   &lt;chr&gt;             &lt;date&gt;     &lt;date&gt;     &lt;int&gt;
-## 1 ARIMA             2025-11-01 2025-11-29  1020
-## 2 AdaptiveEnsemble  2025-11-01 2025-11-29  1020
-## 3 FluSight-baseline 2025-11-01 2025-11-29  1020
-## 4 LGBM_t10          2025-11-01 2025-11-22   816
-## 5 LGBM_t100         2025-11-01 2025-11-22   816
-## 6 SVM               2025-11-01 2025-11-29  1020</code></pre>
-<pre class="r"><code>cat(&quot;Common evaluation set date range:\n&quot;)</code></pre>
-<pre><code>## Common evaluation set date range:</code></pre>
-<pre class="r"><code>print(wis_scores_common %&gt;% summarise(start=min(target_end_date), end=max(target_end_date), n_dates=n_distinct(target_end_date)))</code></pre>
-<pre><code>## # A tibble: 1 × 3
-##   start      end        n_dates
-##   &lt;date&gt;     &lt;date&gt;       &lt;int&gt;
-## 1 2025-11-01 2025-11-22       4</code></pre>
-<pre class="r"><code>cat(&quot;\n&quot;)</code></pre>
+## EVALUATION INFO:</code></pre>
+<pre class="r"><code>cat(&quot;Per-horizon evaluation start dates:\n&quot;)</code></pre>
+<pre><code>## Per-horizon evaluation start dates:</code></pre>
+<pre class="r"><code>for (hh in names(EVAL_START_BY_HORIZON)) {
+  cat(sprintf(&quot;  Horizon %s: target_end_date &gt;= %s\n&quot;, hh, as.character(EVAL_START_BY_HORIZON[hh])))
+}</code></pre>
+<pre><code>##   Horizon 1: target_end_date &gt;= 2025-11-22
+##   Horizon 2: target_end_date &gt;= 2025-11-29
+##   Horizon 3: target_end_date &gt;= 2025-12-06
+##   Horizon 4: target_end_date &gt;= 2025-12-13</code></pre>
+<pre class="r"><code>cat(&quot;\nCommon evaluation set date range per horizon:\n&quot;)</code></pre>
+<pre><code>## 
+## Common evaluation set date range per horizon:</code></pre>
+<pre class="r"><code>print(wis_scores_common %&gt;% group_by(h) %&gt;% summarise(start=min(target_end_date), end=max(target_end_date), n_dates=n_distinct(target_end_date)))</code></pre>
+<pre><code>## # A tibble: 3 × 4
+##       h start      end        n_dates
+##   &lt;dbl&gt; &lt;date&gt;     &lt;date&gt;       &lt;int&gt;
+## 1     1 2025-11-22 2025-11-29       2
+## 2     2 2025-11-29 2025-12-06       2
+## 3     3 2025-12-06 2025-12-06       1</code></pre>
 <pre class="r"><code># Per-horizon geometric mean WIS and relative WIS
 wis_by_model &lt;- wis_scores_common %&gt;%
   group_by(h, model, location) %&gt;%
@@ -699,40 +672,46 @@ per_horizon_summary &lt;- wis_by_model %&gt;%
   ungroup() %&gt;%
   arrange(h, is.na(relative_wis), relative_wis)
 
-cat(&quot;\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (&gt;= 2024-10-01):\n\n&quot;)</code></pre>
+cat(&quot;\n\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS:\n\n&quot;)</code></pre>
 <pre><code>## 
-## PER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS (&gt;= 2024-10-01):</code></pre>
+## 
+## PER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS:</code></pre>
 <pre class="r"><code>print(knitr::kable(per_horizon_summary, digits = 4))</code></pre>
 <pre><code>## 
 ## 
 ## |  h|model             | geometric_mean_wis| relative_wis|
 ## |--:|:-----------------|------------------:|------------:|
-## |  1|AdaptiveEnsemble  |             2.1808|       0.5349|
-## |  1|ARIMA             |             2.4346|       0.5972|
-## |  1|SVM               |             2.4892|       0.6106|
-## |  1|FluSight-baseline |             4.0768|       1.0000|
-## |  1|LGBM_t100         |             4.9497|       1.2141|
-## |  1|LGBM_t10          |             6.0251|       1.4779|
-## |  2|AdaptiveEnsemble  |             2.3995|       0.5767|
-## |  2|ARIMA             |             2.8811|       0.6924|
-## |  2|SVM               |             2.9247|       0.7029|
-## |  2|FluSight-baseline |             4.1611|       1.0000|
-## |  2|LGBM_t100         |             4.2227|       1.0148|
-## |  2|LGBM_t10          |             4.5356|       1.0900|
-## |  3|AdaptiveEnsemble  |             2.5448|       0.6045|
-## |  3|SVM               |             3.2350|       0.7684|
-## |  3|ARIMA             |             3.5559|       0.8446|
-## |  3|LGBM_t100         |             4.0831|       0.9699|
-## |  3|LGBM_t10          |             4.1306|       0.9811|
-## |  3|FluSight-baseline |             4.2100|       1.0000|
-## |  4|AdaptiveEnsemble  |             3.0469|       0.7178|
-## |  4|SVM               |             3.1917|       0.7519|
-## |  4|LGBM_t100         |             3.5139|       0.8278|
-## |  4|LGBM_t10          |             3.6700|       0.8645|
-## |  4|FluSight-baseline |             4.2450|       1.0000|
-## |  4|ARIMA             |             4.4448|       1.0471|</code></pre>
-<pre class="r"><code># Combined across horizons
+## |  1|LGBM_blended      |            95.6372|       0.6336|
+## |  1|LGBM_bounded      |           108.9193|       0.7216|
+## |  1|ARIMA             |           125.5444|       0.8317|
+## |  1|AdaptiveEnsemble  |           129.8288|       0.8601|
+## |  1|SVM               |           136.5143|       0.9044|
+## |  1|LGBM_bounded_wide |           146.0432|       0.9675|
+## |  1|FluSight-baseline |           150.9440|       1.0000|
+## |  2|LGBM_blended      |           153.8866|       0.7621|
+## |  2|ARIMA             |           175.7084|       0.8702|
+## |  2|LGBM_bounded      |           189.5421|       0.9387|
+## |  2|FluSight-baseline |           201.9232|       1.0000|
+## |  2|SVM               |           245.7516|       1.2171|
+## |  2|AdaptiveEnsemble  |           268.9862|       1.3321|
+## |  3|LGBM_blended      |           189.0769|       0.7736|
+## |  3|ARIMA             |           232.5253|       0.9513|
+## |  3|LGBM_bounded      |           236.0435|       0.9657|
+## |  3|FluSight-baseline |           244.4165|       1.0000|
+## |  3|SVM               |           299.4049|       1.2250|
+## |  3|AdaptiveEnsemble  |           352.7239|       1.4431|</code></pre>
+<pre class="r"><code># Combined across horizons - only include models with all available horizons
+# First, find how many horizons have data
+n_horizons_with_data &lt;- n_distinct(wis_scores_common$h)
+
+models_with_all_horizons &lt;- wis_scores_common %&gt;%
+  group_by(model) %&gt;%
+  summarise(n_horizons = n_distinct(h), .groups=&#39;drop&#39;) %&gt;%
+  filter(n_horizons == n_horizons_with_data) %&gt;%
+  pull(model)
+
 combined_by_model &lt;- wis_scores_common %&gt;%
+  filter(model %in% models_with_all_horizons) %&gt;%
   group_by(model, location) %&gt;%
   summarise(mean_wis_loc = mean(interval_score, na.rm=TRUE), .groups=&#39;drop&#39;) %&gt;%
   group_by(model) %&gt;%
@@ -746,20 +725,23 @@ combined_summary &lt;- combined_by_model %&gt;%
   select(-baseline_gmw) %&gt;%
   arrange(is.na(relative_wis), relative_wis)
 
-cat(&quot;\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (All horizons, &gt;= 2024-10-01):\n\n&quot;)</code></pre>
+cat(sprintf(&quot;\n\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (Horizons 1-%d):\n\n&quot;, n_horizons_with_data))</code></pre>
 <pre><code>## 
-## COMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (All horizons, &gt;= 2024-10-01):</code></pre>
+## 
+## COMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (Horizons 1-3):</code></pre>
+<pre class="r"><code>cat(sprintf(&quot;Note: Only models with data for all %d horizons with ground truth are included.\n&quot;, n_horizons_with_data))</code></pre>
+<pre><code>## Note: Only models with data for all 3 horizons with ground truth are included.</code></pre>
 <pre class="r"><code>print(knitr::kable(combined_summary, digits = 4))</code></pre>
 <pre><code>## 
 ## 
 ## |model             | geometric_mean_wis| relative_wis|
 ## |:-----------------|------------------:|------------:|
-## |AdaptiveEnsemble  |             2.6437|       0.6333|
-## |SVM               |             3.0821|       0.7383|
-## |ARIMA             |             3.4764|       0.8328|
-## |FluSight-baseline |             4.1745|       1.0000|
-## |LGBM_t100         |             4.6637|       1.1172|
-## |LGBM_t10          |             5.1960|       1.2447|</code></pre>
+## |LGBM_blended      |           150.2782|       0.7751|
+## |ARIMA             |           174.1258|       0.8981|
+## |LGBM_bounded      |           184.8745|       0.9535|
+## |FluSight-baseline |           193.8911|       1.0000|
+## |SVM               |           227.4315|       1.1730|
+## |AdaptiveEnsemble  |           242.8989|       1.2528|</code></pre>
 </div>
 
 
