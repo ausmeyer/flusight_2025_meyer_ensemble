@@ -465,7 +465,7 @@ models</h3>
 </div>
 
 
-<p>Generated on: 2025-12-13 13:20:37.612574</p>
+<p>Generated on: 2025-12-13 20:19:03.5462</p>
 <div id="retrospective-wis-evaluation" class="section level1">
 <h1>Retrospective WIS Evaluation</h1>
 <pre class="r"><code># Per-horizon evaluation start dates based on first forecast with ground truth
@@ -681,25 +681,27 @@ cat(&quot;\n\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS:\n\n&quot;)</code>
 ## 
 ## |  h|model             | geometric_mean_wis| relative_wis|
 ## |--:|:-----------------|------------------:|------------:|
-## |  1|LGBM_blended      |            95.6372|       0.6336|
-## |  1|LGBM_bounded      |           108.9193|       0.7216|
-## |  1|ARIMA             |           125.5444|       0.8317|
+## |  1|LGBM_blended      |            96.8501|       0.6417|
+## |  1|LGBM_bounded      |           105.6069|       0.6997|
+## |  1|ARIMA             |           125.1019|       0.8288|
 ## |  1|AdaptiveEnsemble  |           129.8288|       0.8601|
-## |  1|SVM               |           136.5143|       0.9044|
-## |  1|LGBM_bounded_wide |           146.0432|       0.9675|
-## |  1|FluSight-baseline |           150.9440|       1.0000|
-## |  2|LGBM_blended      |           153.8866|       0.7621|
-## |  2|ARIMA             |           175.7084|       0.8702|
-## |  2|LGBM_bounded      |           189.5421|       0.9387|
-## |  2|FluSight-baseline |           201.9232|       1.0000|
-## |  2|SVM               |           245.7516|       1.2171|
-## |  2|AdaptiveEnsemble  |           268.9862|       1.3321|
-## |  3|LGBM_blended      |           189.0769|       0.7736|
-## |  3|ARIMA             |           232.5253|       0.9513|
-## |  3|LGBM_bounded      |           236.0435|       0.9657|
-## |  3|FluSight-baseline |           244.4165|       1.0000|
-## |  3|SVM               |           299.4049|       1.2250|
-## |  3|AdaptiveEnsemble  |           352.7239|       1.4431|</code></pre>
+## |  1|SVM               |           136.4641|       0.9041|
+## |  1|LGBM_bounded_wide |           147.6213|       0.9780|
+## |  1|FluSight-baseline |           150.9383|       1.0000|
+## |  2|LGBM_blended      |           163.5960|       0.8104|
+## |  2|ARIMA             |           175.0747|       0.8673|
+## |  2|LGBM_bounded      |           191.1927|       0.9471|
+## |  2|LGBM_bounded_wide |           196.8412|       0.9751|
+## |  2|FluSight-baseline |           201.8699|       1.0000|
+## |  2|SVM               |           245.7623|       1.2174|
+## |  2|AdaptiveEnsemble  |           268.9862|       1.3325|
+## |  3|LGBM_bounded_wide |           137.8863|       0.5643|
+## |  3|LGBM_blended      |           195.5416|       0.8002|
+## |  3|LGBM_bounded      |           215.5328|       0.8820|
+## |  3|ARIMA             |           230.6714|       0.9440|
+## |  3|FluSight-baseline |           244.3615|       1.0000|
+## |  3|SVM               |           299.5170|       1.2257|
+## |  3|AdaptiveEnsemble  |           352.7239|       1.4435|</code></pre>
 <pre class="r"><code># Combined across horizons - only include models with all available horizons
 # First, find how many horizons have data
 n_horizons_with_data &lt;- n_distinct(wis_scores_common$h)
@@ -736,12 +738,13 @@ cat(sprintf(&quot;\n\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (Horizons 1-%
 ## 
 ## |model             | geometric_mean_wis| relative_wis|
 ## |:-----------------|------------------:|------------:|
-## |LGBM_blended      |           150.2782|       0.7751|
-## |ARIMA             |           174.1258|       0.8981|
-## |LGBM_bounded      |           184.8745|       0.9535|
-## |FluSight-baseline |           193.8911|       1.0000|
-## |SVM               |           227.4315|       1.1730|
-## |AdaptiveEnsemble  |           242.8989|       1.2528|</code></pre>
+## |LGBM_blended      |           154.2987|       0.7960|
+## |ARIMA             |           173.1269|       0.8931|
+## |LGBM_bounded      |           182.5043|       0.9415|
+## |FluSight-baseline |           193.8494|       1.0000|
+## |LGBM_bounded_wide |           195.2378|       1.0072|
+## |SVM               |           227.3988|       1.1731|
+## |AdaptiveEnsemble  |           242.8989|       1.2530|</code></pre>
 </div>
 
 

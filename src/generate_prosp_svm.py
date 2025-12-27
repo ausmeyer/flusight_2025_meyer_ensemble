@@ -142,6 +142,13 @@ def main():
             error_dist = params.get('error_distribution', {})
             errors = error_dist.get(horizon, []) if isinstance(error_dist, dict) else []
             use_log = params.get('use_log_transform', False)
+            # Load bias correction and blending parameters (matching retrospective)
+            point_bias = float(params.get('point_bias', 0.0))
+            blend_alpha = float(params.get('blend_alpha', 1.0))
+
+            # Diagnostic: show correction parameters
+            if abs(point_bias) > 0.01 or blend_alpha < 0.99:
+                print(f"  {loc}: bias={point_bias:.2f}, blend_alpha={blend_alpha:.2f}")
 
             # Build training features up to last_date - 1 day (avoid leakage)
             end_train = last_date - pd.Timedelta(days=1)
@@ -170,7 +177,16 @@ def main():
             point_t = float(model.predict(scaler.transform(x_last))[0])
             point = float(inverse_log_transform(np.array([point_t]), use_log)[0])
 
-            qvals = quantiles_from_residuals(point, residuals, scale=residual_scale, fallback_errors=errors)
+            # Get last observed value for persistence blending (matching retrospective)
+            last_val_series = df.loc[df['date'] == last_date, loc]
+            last_value = float(last_val_series.iloc[0]) if len(last_val_series) > 0 else point
+
+            # Apply bias correction and blend with persistence (matching retrospective)
+            point_adj = point + point_bias
+            point_blend = blend_alpha * point_adj + (1.0 - blend_alpha) * last_value
+            point_blend = max(0.0, point_blend)  # Ensure non-negative
+
+            qvals = quantiles_from_residuals(point_blend, residuals, scale=residual_scale, fallback_errors=errors)
             fips = STATE_TO_FIPS.get(loc, loc)
             target_date = last_date + pd.Timedelta(weeks=horizon)
             for qi, q in enumerate(CDC_QUANTILES):

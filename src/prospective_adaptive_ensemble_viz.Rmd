@@ -25,6 +25,9 @@ if (dir.exists('../data/imputed_sets')) {
   stop("Could not locate data/imputed_sets/ directory")
 }
 
+# Load ground truth
+data_dir <- file.path(root_prefix, 'data/imputed_sets')
+
 # Helper: latest file by pattern
 latest_file <- function(dir, pattern) {
   files <- list.files(dir, pattern = pattern, full.names = TRUE)
@@ -32,8 +35,6 @@ latest_file <- function(dir, pattern) {
   files[order(files)][length(files)]
 }
 
-# Load ground truth
-data_dir <- file.path(root_prefix, 'data/imputed_sets')
 actual_path <- latest_file(data_dir, '^imputed_and_stitched_hosp_.*\\.csv$')
 actual_raw <- read_csv(actual_path, show_col_types = FALSE)
 
@@ -55,7 +56,7 @@ fips_to_name <- setNames(names(location_to_fips), location_to_fips)
 # All state names (excluding US and PR for state selector)
 all_states <- sort(names(location_to_fips)[!names(location_to_fips) %in% c('US', 'Puerto Rico')])
 
-# Prepare ground truth (since 2024-07-01 for context)
+# Prepare ground truth (since 2024-09-01 for current season context)
 actual_data <- actual_raw %>%
   transmute(
     location = location_to_fips[location_name],
@@ -63,81 +64,175 @@ actual_data <- actual_raw %>%
     date = as.Date(date),
     actual_value = total_hosp
   ) %>%
-  filter(!is.na(location), !is.na(actual_value), date >= as.Date('2024-07-01'))
+  filter(!is.na(location), !is.na(actual_value), date >= as.Date('2024-09-01'))
 
 # Prospective directory
 prosp_dir <- file.path(root_prefix, 'forecasts/prospective')
 
-# Helper to load prospective forecast CSV (finds latest file matching pattern)
-load_prosp_quantiles <- function(pattern, model_name, file_horizon) {
-  path <- latest_file(prosp_dir, pattern)
-  if (is.na(path) || !file.exists(path)) return(NULL)
-  df <- read_csv(path, show_col_types = FALSE) %>%
-    filter(output_type == 'quantile') %>%
-    mutate(
-      model = model_name,
-      reference_date = as.Date(reference_date),
-      target_end_date = as.Date(target_end_date),
-      location = as.character(location),
-      output_type_id = as.numeric(output_type_id),
-      value = as.numeric(value),
-      horizon = file_horizon
-    ) %>%
-    select(model, reference_date, horizon, target_end_date, location, output_type_id, value)
+# Helper to load ALL prospective forecast files matching a pattern (returns list by date)
+# Base model filenames use prior Saturday, but we convert to CDC reference date (upcoming Saturday)
+load_all_prosp_files <- function(base_pattern, model_name, file_horizon) {
+  # Pattern like: ARIMA_h1_prospective_(\d{8})\.csv
+  full_pattern <- sprintf('%s_prospective_(\\d{8})\\.csv', base_pattern)
+  files <- list.files(prosp_dir, pattern = full_pattern, full.names = TRUE)
+  if (length(files) == 0) return(NULL)
+
+  result <- lapply(files, function(path) {
+    # Extract date from filename (base model date = prior Saturday)
+    ts_match <- regexpr("\\d{8}", basename(path))
+    base_date_str <- regmatches(basename(path), ts_match)
+
+    # Convert to CDC reference date (add 7 days)
+    cdc_date <- as.Date(base_date_str, format = '%Y%m%d') + 7
+    cdc_date_str <- format(cdc_date, '%Y%m%d')
+
+    tryCatch({
+      df <- read_csv(path, show_col_types = FALSE) %>%
+        filter(output_type == 'quantile') %>%
+        mutate(
+          model = model_name,
+          forecast_date = cdc_date_str,  # Use CDC reference date for consistency
+          reference_date = as.Date(reference_date),
+          target_end_date = as.Date(target_end_date),
+          location = as.character(location),
+          output_type_id = as.numeric(output_type_id),
+          value = as.numeric(value),
+          horizon = file_horizon
+        ) %>%
+        select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    }, error = function(e) NULL)
+  })
+
+  bind_rows(result)
 }
 
-# Load all prospective forecasts - find latest file for each model/horizon
+# Load all prospective forecasts for all dates
 all_forecasts <- list()
 
 for (h in 1:4) {
   # ARIMA
-  all_forecasts[[paste0('ARIMA_h', h)]] <- load_prosp_quantiles(
-    sprintf('ARIMA_h%d_prospective_\\d{8}\\.csv', h), 'ARIMA', h)
+  all_forecasts[[paste0('ARIMA_h', h)]] <- load_all_prosp_files(
+    sprintf('ARIMA_h%d', h), 'ARIMA', h)
 
   # SVM
-  all_forecasts[[paste0('SVM_h', h)]] <- load_prosp_quantiles(
-    sprintf('SVM_h%d_prospective_\\d{8}\\.csv', h), 'SVM', h)
+  all_forecasts[[paste0('SVM_h', h)]] <- load_all_prosp_files(
+    sprintf('SVM_h%d', h), 'SVM', h)
 
   # LGBM Blended (t10+t100+persistence with conformal CIs)
-  all_forecasts[[paste0('LGBM_blended_h', h)]] <- load_prosp_quantiles(
-    sprintf('LGBM-blended_h%d_prospective_\\d{8}\\.csv', h), 'LGBM-blended', h)
+  all_forecasts[[paste0('LGBM_blended_h', h)]] <- load_all_prosp_files(
+    sprintf('LGBM-blended_h%d', h), 'LGBM-blended', h)
 
   # LGBM bounded
-  all_forecasts[[paste0('LGBM_bounded_h', h)]] <- load_prosp_quantiles(
-    sprintf('TwoStage-FrozenMu-bounded_h%d_prospective_\\d{8}\\.csv', h), 'LGBM-bounded', h)
+  all_forecasts[[paste0('LGBM_bounded_h', h)]] <- load_all_prosp_files(
+    sprintf('TwoStage-FrozenMu-bounded_h%d', h), 'LGBM-bounded', h)
+
+  # LGBM bounded wide variants 1-5
+  for (v in 1:5) {
+    all_forecasts[[paste0('LGBM_bounded_wide_', v, '_h', h)]] <- load_all_prosp_files(
+      sprintf('TwoStage-FrozenMu-bounded-wide-%d_h%d', v, h),
+      sprintf('LGBM-bounded-wide-%d', v), h)
+  }
 }
 
-# Adaptive Ensemble (single file with all horizons)
-ens_path <- latest_file(prosp_dir, '^AdaptiveEnsemble_prospective_\\d{8}\\.csv$')
-if (!is.na(ens_path)) {
-  ens_df <- read_csv(ens_path, show_col_types = FALSE) %>%
-    filter(output_type == 'quantile') %>%
-    mutate(
-      model = 'AdaptiveEnsemble',
-      reference_date = as.Date(reference_date),
-      target_end_date = as.Date(target_end_date),
-      location = as.character(location),
-      output_type_id = as.numeric(output_type_id),
-      value = as.numeric(value),
-      horizon = as.integer(horizon) + 1L  # Convert 0-based to 1-based
-    ) %>%
-    select(model, reference_date, horizon, target_end_date, location, output_type_id, value)
-  all_forecasts[['Ensemble']] <- ens_df
+# Adaptive Ensemble - fetch historical from GitHub, use local only for latest
+# All forecast_date values now use CDC reference date convention (upcoming Saturday, YYYYMMDD)
 
-  # Extract timestamp for display
-  ts_match <- regexpr("\\d{8}", basename(ens_path))
-  ts_str <- regmatches(basename(ens_path), ts_match)
+github_base_url <- 'https://raw.githubusercontent.com/cdcepi/FluSight-forecast-hub/main/model-output/MIGHTE-Nsemble'
+
+# 2024-25 season CDC dates available on GitHub
+github_ensemble_dates <- c('2025-11-22', '2025-11-29', '2025-12-06', '2025-12-13')
+
+# Find the latest local ensemble file (uses CDC date convention)
+local_ens_files <- list.files(prosp_dir, pattern = '^AdaptiveEnsemble_prospective_\\d{8}\\.csv$', full.names = TRUE)
+latest_local_cdc_date <- if (length(local_ens_files) > 0) {
+  dates <- sapply(local_ens_files, function(f) {
+    m <- regexpr("\\d{8}", basename(f))
+    regmatches(basename(f), m)
+  })
+  max(dates)
 } else {
-  ts_str <- ""
+  ""
+}
+
+# Load historical ensemble from GitHub
+ens_list <- list()
+
+for (cdc_date in github_ensemble_dates) {
+  # Convert to YYYYMMDD format for forecast_date
+  cdc_date_str <- gsub('-', '', cdc_date)
+
+  # Skip if this is the latest local date (we'll use local file for that)
+  if (cdc_date_str == latest_local_cdc_date) next
+
+  url <- sprintf('%s/%s-MIGHTE-Nsemble.csv', github_base_url, cdc_date)
+
+  tryCatch({
+    df <- read_csv(url, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble',
+        forecast_date = cdc_date_str,  # Use CDC date (YYYYMMDD)
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L  # Convert 0-based to 1-based
+      ) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    ens_list[[cdc_date]] <- df
+  }, error = function(e) {
+    message(sprintf("Could not fetch ensemble from GitHub for %s: %s", cdc_date, e$message))
+  })
+}
+
+# Load the latest local ensemble file only
+if (latest_local_cdc_date != "" && length(local_ens_files) > 0) {
+  latest_file_path <- local_ens_files[sapply(local_ens_files, function(f) grepl(latest_local_cdc_date, f))]
+  if (length(latest_file_path) > 0) {
+    tryCatch({
+      df <- read_csv(latest_file_path[1], show_col_types = FALSE) %>%
+        filter(output_type == 'quantile') %>%
+        mutate(
+          model = 'AdaptiveEnsemble',
+          forecast_date = latest_local_cdc_date,  # Use CDC date (YYYYMMDD)
+          reference_date = as.Date(reference_date),
+          target_end_date = as.Date(target_end_date),
+          location = as.character(location),
+          output_type_id = as.numeric(output_type_id),
+          value = as.numeric(value),
+          horizon = as.integer(horizon) + 1L
+        ) %>%
+        select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+      ens_list[['local_latest']] <- df
+    }, error = function(e) {
+      message(sprintf("Could not load local ensemble: %s", e$message))
+    })
+  }
+}
+
+if (length(ens_list) > 0) {
+  all_forecasts[['Ensemble']] <- bind_rows(ens_list)
 }
 
 # Combine all forecasts
 forecasts_all <- bind_rows(all_forecasts) %>%
   filter(!is.na(value))
 
-# Summarize quantiles per model/horizon/location
+# Get all unique forecast dates
+all_forecast_dates <- sort(unique(forecasts_all$forecast_date), decreasing = TRUE)
+latest_date <- if (length(all_forecast_dates) > 0) all_forecast_dates[1] else ""
+
+# Format dates for display (YYYYMMDD -> YYYY-MM-DD)
+format_date_display <- function(d) {
+  paste0(substr(d, 1, 4), "-", substr(d, 5, 6), "-", substr(d, 7, 8))
+}
+
+date_choices <- setNames(all_forecast_dates, sapply(all_forecast_dates, format_date_display))
+
+# Summarize quantiles per model/horizon/location/forecast_date
 forecast_summary <- forecasts_all %>%
-  group_by(model, horizon, reference_date, target_end_date, location) %>%
+  group_by(model, horizon, forecast_date, reference_date, target_end_date, location) %>%
   summarise(
     q025 = value[which.min(abs(output_type_id - 0.025))],
     q25 = value[which.min(abs(output_type_id - 0.25))],
@@ -164,7 +259,12 @@ model_colors <- c(
   "ARIMA" = "#1f77b4",
   "SVM" = "#2ca02c",
   "LGBM-blended" = "#9467bd",
-  "LGBM-bounded" = "#e377c2"
+  "LGBM-bounded" = "#e377c2",
+  "LGBM-bounded-wide-1" = "#8c564b",
+  "LGBM-bounded-wide-2" = "#17becf",
+  "LGBM-bounded-wide-3" = "#bcbd22",
+  "LGBM-bounded-wide-4" = "#7f7f7f",
+  "LGBM-bounded-wide-5" = "#d62728"
 )
 
 # Fill colors (lighter versions for ribbons)
@@ -173,7 +273,12 @@ model_fills <- c(
   "ARIMA" = "#7fbfff",
   "SVM" = "#90ee90",
   "LGBM-blended" = "#c9b3d9",
-  "LGBM-bounded" = "#f0b8d0"
+  "LGBM-bounded" = "#f0b8d0",
+  "LGBM-bounded-wide-1" = "#c49a91",
+  "LGBM-bounded-wide-2" = "#9edae5",
+  "LGBM-bounded-wide-3" = "#dbdb8d",
+  "LGBM-bounded-wide-4" = "#c7c7c7",
+  "LGBM-bounded-wide-5" = "#ff9896"
 )
 ```
 
@@ -181,6 +286,39 @@ Sidebar {.sidebar}
 =====================================
 
 ```{r}
+# Date selector with backward/forward navigation
+h4("Forecast Date")
+
+selectInput(
+  "forecast_date",
+  NULL,
+  choices = date_choices,
+  selected = latest_date
+)
+
+# Navigation buttons
+fluidRow(
+  column(6, actionButton("prev_date", "<< Prev", width = "100%")),
+  column(6, actionButton("next_date", "Next >>", width = "100%"))
+)
+
+# Update date on button clicks
+observeEvent(input$prev_date, {
+  current_idx <- which(all_forecast_dates == input$forecast_date)
+  if (current_idx < length(all_forecast_dates)) {
+    updateSelectInput(session, "forecast_date", selected = all_forecast_dates[current_idx + 1])
+  }
+})
+
+observeEvent(input$next_date, {
+  current_idx <- which(all_forecast_dates == input$forecast_date)
+  if (current_idx > 1) {
+    updateSelectInput(session, "forecast_date", selected = all_forecast_dates[current_idx - 1])
+  }
+})
+
+hr()
+
 checkboxGroupInput(
   "models",
   "Select Models:",
@@ -211,7 +349,7 @@ checkboxInput("show_median", "Show Median", value = TRUE)
 hr()
 
 p("Black line = Ground Truth")
-p("Forecast Date:", ts_str)
+p(paste("Dates available:", length(all_forecast_dates)))
 p("Generated:", format(Sys.Date(), "%Y-%m-%d"))
 p(paste("Models found:", length(all_models)))
 ```
@@ -224,11 +362,13 @@ Row
 
 ```{r}
 renderPlot({
-  req(input$models)
+  req(input$models, input$forecast_date)
 
-  # Filter to selected models, exclude US and PR
+  # Filter to selected models and forecast date, exclude US and PR
   fc_data <- forecast_summary %>%
-    filter(model %in% input$models, !location %in% c('US', '72'))
+    filter(model %in% input$models,
+           forecast_date == input$forecast_date,
+           !location %in% c('US', '72'))
 
   actuals <- actual_data %>% filter(!location %in% c('US', '72'))
 
@@ -276,11 +416,15 @@ renderPlot({
     )
   }
 
+  # Add vertical reference line at forecast date
+  ref_date <- as.Date(format_date_display(input$forecast_date))
+
   # Adjust text size based on number of facets
   base_size <- if (n_states <= 4) 12 else if (n_states <= 9) 11 else 10
   strip_size <- if (n_states <= 4) 11 else if (n_states <= 9) 9 else 8
 
   p + facet_wrap(~ location_name, scales = 'free_y', ncol = ncols) +
+    geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray50", alpha = 0.7) +
     scale_color_manual(values = model_colors, drop = TRUE) +
     scale_fill_manual(values = model_fills, drop = TRUE) +
     theme_bw(base_size = base_size) +
@@ -291,10 +435,10 @@ renderPlot({
       axis.text.y = element_text(size = 9)
     ) +
     labs(
-      title = paste0("Prospective Forecasts (", ts_str, ") - All Horizons"),
+      title = paste0("Prospective Forecasts (", format_date_display(input$forecast_date), ") - All Horizons"),
       subtitle = if (is.null(input$states) || length(input$states) == 0)
-        "Bands show uncertainty across horizons 1-4 weeks ahead (all states)"
-        else paste0("Selected: ", paste(input$states, collapse = ", ")),
+        "Bands show uncertainty across horizons 1-4 weeks ahead (all states). Dashed line = forecast date."
+        else paste0("Selected: ", paste(input$states, collapse = ", "), ". Dashed line = forecast date."),
       x = "Date",
       y = "Weekly Hospitalizations",
       color = "Model",
@@ -315,10 +459,12 @@ Row {data-height=600}
 
 ```{r}
 renderPlot({
-  req(input$models)
+  req(input$models, input$forecast_date)
 
   fc_data <- forecast_summary %>%
-    filter(location == 'US', model %in% input$models)
+    filter(location == 'US',
+           model %in% input$models,
+           forecast_date == input$forecast_date)
 
   actuals <- actual_data %>% filter(location == 'US')
 
@@ -354,13 +500,17 @@ renderPlot({
     )
   }
 
-  p + scale_color_manual(values = model_colors, drop = TRUE) +
+  # Add vertical reference line at forecast date
+  ref_date <- as.Date(format_date_display(input$forecast_date))
+
+  p + geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray50", alpha = 0.7) +
+    scale_color_manual(values = model_colors, drop = TRUE) +
     scale_fill_manual(values = model_fills, drop = TRUE) +
     theme_bw(base_size = 12) +
     theme(legend.position = "bottom") +
     labs(
-      title = paste0("US National Prospective Forecasts (", ts_str, ")"),
-      subtitle = "All horizons (1-4 weeks ahead) on same plot",
+      title = paste0("US National Prospective Forecasts (", format_date_display(input$forecast_date), ")"),
+      subtitle = "All horizons (1-4 weeks ahead) on same plot. Dashed line = forecast date.",
       x = "Date",
       y = "Weekly Hospitalizations",
       color = "Model",
@@ -377,10 +527,12 @@ Row {data-height=600}
 
 ```{r}
 renderPlot({
-  req(input$models)
+  req(input$models, input$forecast_date)
 
   fc_data <- forecast_summary %>%
-    filter(location == '72', model %in% input$models)
+    filter(location == '72',
+           model %in% input$models,
+           forecast_date == input$forecast_date)
 
   actuals <- actual_data %>% filter(location == '72')
 
@@ -416,13 +568,17 @@ renderPlot({
     )
   }
 
-  p + scale_color_manual(values = model_colors, drop = TRUE) +
+  # Add vertical reference line at forecast date
+  ref_date <- as.Date(format_date_display(input$forecast_date))
+
+  p + geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray50", alpha = 0.7) +
+    scale_color_manual(values = model_colors, drop = TRUE) +
     scale_fill_manual(values = model_fills, drop = TRUE) +
     theme_bw(base_size = 12) +
     theme(legend.position = "bottom") +
     labs(
-      title = paste0("Puerto Rico Prospective Forecasts (", ts_str, ")"),
-      subtitle = "All horizons (1-4 weeks ahead) on same plot",
+      title = paste0("Puerto Rico Prospective Forecasts (", format_date_display(input$forecast_date), ")"),
+      subtitle = "All horizons (1-4 weeks ahead) on same plot. Dashed line = forecast date.",
       x = "Date",
       y = "Weekly Hospitalizations",
       color = "Model",

@@ -66,7 +66,7 @@ class TwoStageTrainer:
     """
     
     def __init__(self, cut_off_date: str, horizon: int = 1, max_lags: int = 12,
-                 trials_stage1: int = 100, trials_stage2: int = 100, random_seed: int = 42,
+                 trials_stage1: int = 100, trials_stage2: int = 100, random_seed: int = None,
                  use_enhanced_features: bool = False, n_features: int = 5,
                  use_log_transform: bool = False,
                  num_threads: int = None,
@@ -524,6 +524,9 @@ class TwoStageTrainer:
                 else:
                     dist = GaussianFrozenLoc()
                 lgbmlss_model = LightGBMLSS(dist)
+                # Pre-set start_values to prevent LightGBMLSS from overwriting our init_score
+                mu_mean = init_score[::2].mean()  # Extract mu values from interleaved init_score
+                lgbmlss_model.start_values = np.array([mu_mean, 0.0], dtype=np.float32)
                 # Train directly (no wrapper)
                 lgbmlss_model.train(params, dtrain, num_boost_round=num_boost_round)
                 
@@ -772,6 +775,11 @@ class TwoStageTrainer:
                 else:
                     dist = GaussianFrozenLoc()
                 lgbmlss_model = LightGBMLSS(dist)
+                # Pre-set start_values to prevent LightGBMLSS from overwriting our init_score
+                # start_values[0] = mean of mu predictions from init_score
+                # start_values[1] = 0 so bounded sigmoid(0) gives middle of range
+                mu_mean = init_score[::2].mean()  # Extract mu values from interleaved init_score
+                lgbmlss_model.start_values = np.array([mu_mean, 0.0], dtype=np.float32)
                 lgbmlss_model.train(params, dtrain, num_boost_round=num_boost_round)
 
                 dist_params = lgbmlss_model.predict(X_pred, pred_type="parameters")
@@ -1034,6 +1042,9 @@ class TwoStageTrainer:
         else:
             dist = GaussianFrozenLoc()
         lgbmlss_model = LightGBMLSS(dist)
+        # Pre-set start_values to prevent LightGBMLSS from overwriting our init_score
+        mu_mean = init_score[::2].mean()  # Extract mu values from interleaved init_score
+        lgbmlss_model.start_values = np.array([mu_mean, 0.0], dtype=np.float32)
         lgbmlss_model.train(best_params, dtrain, num_boost_round=num_boost_round)
         
         # Use CV WIS as the performance metric
@@ -1197,8 +1208,8 @@ def main():
                        help='Number of Optuna trials for Stage 1 (default: 100)')
     parser.add_argument('--trials-stage2', type=int, default=100,
                        help='Number of Optuna trials for Stage 2 (default: 100)')
-    parser.add_argument('--random-seed', type=int, default=42,
-                       help='Random seed for reproducibility (default: 42)')
+    parser.add_argument('--random-seed', type=int, default=None,
+                       help='Random seed for reproducibility (default: None for random)')
     parser.add_argument('--no-stage2-pruning', action='store_true',
                        help='Disable Optuna pruning for Stage 2 trials')
     parser.add_argument('--num-threads', type=int, default=None,

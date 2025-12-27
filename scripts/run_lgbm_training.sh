@@ -33,7 +33,6 @@ export NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-1}
 #     --trials-stage1 100 \
 #     --trials-stage2 50 \
 #     --n-features 10 \
-#     --random-seed 1 \
 #     --num-threads ${LGBM_NUM_THREADS:-16} \
 #     --optuna-jobs ${OPTUNA_JOBS:-1} \
 #     "$@"
@@ -47,7 +46,6 @@ export NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-1}
 #     --trials-stage1 100 \
 #     --trials-stage2 50 \
 #     --n-features 10 \
-#     --random-seed 1 \
 #     --num-threads ${LGBM_NUM_THREADS:-16} \
 #     --optuna-jobs ${OPTUNA_JOBS:-1} \
 #     "$@"
@@ -61,7 +59,6 @@ export NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-1}
 #     --trials-stage1 100 \
 #     --trials-stage2 50 \
 #     --n-features 10 \
-#     --random-seed 1 \
 #     --num-threads ${LGBM_NUM_THREADS:-16} \
 #     --optuna-jobs ${OPTUNA_JOBS:-1} \
 #     "$@"
@@ -75,7 +72,6 @@ export NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-1}
 #     --trials-stage1 100 \
 #     --trials-stage2 50 \
 #     --n-features 10 \
-#     --random-seed 1 \
 #     --num-threads ${LGBM_NUM_THREADS:-16} \
 #     --optuna-jobs ${OPTUNA_JOBS:-1} \
 #     "$@"
@@ -112,40 +108,123 @@ echo "Using data file: $STITCHED"
 #     --trials-stage1 10 \
 #     --trials-stage2 10 \
 #     --n-features 10 \
-#     --random-seed 1 \
 #     --num-threads ${LGBM_NUM_THREADS:-16} \
 #     --optuna-jobs ${OPTUNA_JOBS:-1} \
 #     "$@"
 # done
 
 # =============================================================================
-# BOUNDED SIGMA WIDE VARIANT (wider sigma range [0.1, 0.8])
+# BOUNDED SIGMA WIDE VARIANT 1 (wider sigma range [0.1, 0.8])
+# =============================================================================
+# Uncomment below to retrain bounded-wide-1 models
+
+# echo ""
+# echo "============================================================================="
+# echo "Training BOUNDED SIGMA WIDE-1 Models (log-space with sigma in [0.1, 0.8])"
+# echo "============================================================================="
+#
+# for H in 1 2 3 4; do
+#   echo ""
+#   echo ">>> Training bounded sigma wide-1 model for horizon $H"
+#   python src/train_two_stage.py \
+#     --data-file "$STITCHED" \
+#     --cut-off 2024-07-01 \
+#     --locations Alabama Alaska Arizona Arkansas California Colorado Connecticut Delaware "District of Columbia" Florida Georgia Hawaii Idaho Illinois Indiana Iowa Kansas Kentucky Louisiana Maine Maryland Massachusetts Michigan Minnesota Mississippi Missouri Montana Nebraska Nevada "New Hampshire" "New Jersey" "New Mexico" "New York" "North Carolina" "North Dakota" Ohio Oklahoma Oregon Pennsylvania "Puerto Rico" "Rhode Island" "South Carolina" "South Dakota" Tennessee Texas US Utah Vermont Virginia Washington "West Virginia" Wisconsin Wyoming \
+#     --horizon $H \
+#     --use-enhanced-features \
+#     --bounded-sigma-wide \
+#     --models-output-dir models/lgbm_enhanced_t10_bounded_wide_1 \
+#     --trials-stage1 10 \
+#     --trials-stage2 10 \
+#     --n-features 10 \
+#     --num-threads ${LGBM_NUM_THREADS:-16} \
+#     --optuna-jobs ${OPTUNA_JOBS:-1} \
+#     "$@"
+# done
+
+# =============================================================================
+# BOUNDED SIGMA WIDE VARIANT 2 (wider sigma range [0.1, 0.8]) - COMMENTED OUT
+# =============================================================================
+
+# echo ""
+# echo "============================================================================="
+# echo "Training BOUNDED SIGMA WIDE-2 Models (log-space with sigma in [0.1, 0.8])"
+# echo "============================================================================="
+#
+# for H in 1 2 3 4; do
+#   echo ""
+#   echo ">>> Training bounded sigma wide-2 model for horizon $H"
+#   python src/train_two_stage.py \
+#     --data-file "$STITCHED" \
+#     --cut-off 2024-07-01 \
+#     --locations Alabama Alaska Arizona Arkansas California Colorado Connecticut Delaware "District of Columbia" Florida Georgia Hawaii Idaho Illinois Indiana Iowa Kansas Kentucky Louisiana Maine Maryland Massachusetts Michigan Minnesota Mississippi Missouri Montana Nebraska Nevada "New Hampshire" "New Jersey" "New Mexico" "New York" "North Carolina" "North Dakota" Ohio Oklahoma Oregon Pennsylvania "Puerto Rico" "Rhode Island" "South Carolina" "South Dakota" Tennessee Texas US Utah Vermont Virginia Washington "West Virginia" Wisconsin Wyoming \
+#     --horizon $H \
+#     --use-enhanced-features \
+#     --bounded-sigma-wide \
+#     --models-output-dir models/lgbm_enhanced_t10_bounded_wide_2 \
+#     --trials-stage1 10 \
+#     --trials-stage2 10 \
+#     --n-features 10 \
+#     --num-threads ${LGBM_NUM_THREADS:-16} \
+#     --optuna-jobs ${OPTUNA_JOBS:-1} \
+#     "$@"
+# done
+
+# =============================================================================
+# BOUNDED SIGMA NARROW (sigma range [0.15, 0.45]) - RETRAIN TO FIX BUG
 # =============================================================================
 
 echo ""
 echo "============================================================================="
-echo "Training BOUNDED SIGMA WIDE Models (log-space with sigma in [0.1, 0.8])"
+echo "Training BOUNDED SIGMA NARROW Models (log-space with sigma in [0.15, 0.45])"
 echo "============================================================================="
 
 for H in 1 2 3 4; do
   echo ""
-  echo ">>> Training bounded sigma wide model for horizon $H"
+  echo ">>> Training bounded sigma narrow model for horizon $H"
   python src/train_two_stage.py \
     --data-file "$STITCHED" \
     --cut-off 2024-07-01 \
     --locations Alabama Alaska Arizona Arkansas California Colorado Connecticut Delaware "District of Columbia" Florida Georgia Hawaii Idaho Illinois Indiana Iowa Kansas Kentucky Louisiana Maine Maryland Massachusetts Michigan Minnesota Mississippi Missouri Montana Nebraska Nevada "New Hampshire" "New Jersey" "New Mexico" "New York" "North Carolina" "North Dakota" Ohio Oklahoma Oregon Pennsylvania "Puerto Rico" "Rhode Island" "South Carolina" "South Dakota" Tennessee Texas US Utah Vermont Virginia Washington "West Virginia" Wisconsin Wyoming \
     --horizon $H \
     --use-enhanced-features \
-    --bounded-sigma-wide \
-    --models-output-dir models/lgbm_enhanced_t10_bounded_wide \
+    --bounded-sigma \
+    --models-output-dir models/lgbm_enhanced_t10_bounded \
     --trials-stage1 10 \
     --trials-stage2 10 \
     --n-features 10 \
-    --random-seed 1 \
     --num-threads ${LGBM_NUM_THREADS:-16} \
     --optuna-jobs ${OPTUNA_JOBS:-1} \
     "$@"
 done
+
+# =============================================================================
+# BOUNDED SIGMA WIDE VARIANT 3 (wider sigma range [0.1, 0.8]) - COMMENTED OUT
+# =============================================================================
+
+# echo ""
+# echo "============================================================================="
+# echo "Training BOUNDED SIGMA WIDE-3 Models (log-space with sigma in [0.1, 0.8])"
+# echo "============================================================================="
+#
+# for H in 1 2 3 4; do
+#   echo ""
+#   echo ">>> Training bounded sigma wide-3 model for horizon $H"
+#   python src/train_two_stage.py \
+#     --data-file "$STITCHED" \
+#     --cut-off 2024-07-01 \
+#     --locations Alabama Alaska Arizona Arkansas California Colorado Connecticut Delaware "District of Columbia" Florida Georgia Hawaii Idaho Illinois Indiana Iowa Kansas Kentucky Louisiana Maine Maryland Massachusetts Michigan Minnesota Mississippi Missouri Montana Nebraska Nevada "New Hampshire" "New Jersey" "New Mexico" "New York" "North Carolina" "North Dakota" Ohio Oklahoma Oregon Pennsylvania "Puerto Rico" "Rhode Island" "South Carolina" "South Dakota" Tennessee Texas US Utah Vermont Virginia Washington "West Virginia" Wisconsin Wyoming \
+#     --horizon $H \
+#     --use-enhanced-features \
+#     --bounded-sigma-wide \
+#     --models-output-dir models/lgbm_enhanced_t10_bounded_wide_3 \
+#     --trials-stage1 10 \
+#     --trials-stage2 10 \
+#     --n-features 10 \
+#     --num-threads ${LGBM_NUM_THREADS:-16} \
+#     --optuna-jobs ${OPTUNA_JOBS:-1} \
+#     "$@"
+# done
 
 echo ""
 echo "============================================================================="

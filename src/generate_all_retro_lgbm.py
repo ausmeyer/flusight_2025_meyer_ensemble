@@ -326,6 +326,9 @@ class BatchRetrospectiveForecastGenerator:
                     else:
                         dist = GaussianFrozenLoc()
                     stage2_model = LightGBMLSS(dist)
+                    # Pre-set start_values to prevent LightGBMLSS from overwriting our init_score
+                    mu_mean = init_score[::2].mean()
+                    stage2_model.start_values = np.array([mu_mean, 0.0], dtype=np.float32)
                     p2 = stage2_params['best_params'].copy(); p2['verbose'] = -1; p2['verbosity'] = -1
                     stage2_model.train(p2, dtrain2, num_boost_round=stage2_params['num_boost_round'])
                     # Store
@@ -540,6 +543,9 @@ class BatchRetrospectiveForecastGenerator:
                         else:
                             dist = GaussianFrozenLoc()
                         temp_stage2 = LightGBMLSS(dist)
+                        # Pre-set start_values to prevent LightGBMLSS from overwriting our init_score
+                        mu_mean = init_score[::2].mean()
+                        temp_stage2.start_values = np.array([mu_mean, 0.0], dtype=np.float32)
                         temp_stage2.train(
                             stage2_params['best_params'],
                             dtrain2,

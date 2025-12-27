@@ -73,7 +73,8 @@ SEASON_END_DAY = 1
 # WEEK_DECAY = 0.1 means ~60% weight at 5 weeks apart, ~37% at 10 weeks
 WEEK_DECAY = 0.1
 # Cap on log-space residuals to avoid extreme outliers skewing the distribution
-RESIDUAL_CAP = 2.5
+# Set to 1.6 to align with bounded-wide sigma max (0.8 * 1.96 ≈ 1.57)
+RESIDUAL_CAP = 1.6
 # Residuals file name pattern
 RESIDUALS_FILE_PATTERN = 'blended_residuals_h{horizon}.csv'
 

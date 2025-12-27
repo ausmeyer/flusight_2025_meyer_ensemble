@@ -47,7 +47,8 @@ SEASON_END_DAY = 1
 WEEK_DECAY = 0.1
 
 # Cap on log-space residuals to avoid extreme outliers skewing the distribution
-RESIDUAL_CAP = 2.5
+# Set to 1.6 to align with bounded-wide sigma max (0.8 * 1.96 ≈ 1.57)
+RESIDUAL_CAP = 1.6
 
 # Minimum residuals for conformal intervals
 MIN_RESIDUALS_FOR_CONFORMAL = 4

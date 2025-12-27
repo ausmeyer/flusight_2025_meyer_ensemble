@@ -59,7 +59,6 @@ python src/train_two_stage.py \
   --trials-stage1 100 \
   --trials-stage2 100 \
   --n-features 10 \
-  --random-seed 1 \
   --num-threads "${LGBM_NUM_THREADS}" \
   --optuna-jobs "${OPTUNA_JOBS}" \
   "${EXTRA_ARGS[@]}"

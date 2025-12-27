@@ -18,6 +18,7 @@ cd "$ROOT_DIR"
 # --include-svm <t/f>        Include SVM in ensemble (default true)
 # --include-lgbm-blended <t/f>  Include LGBM blended in ensemble (default true)
 # --include-lgbm-bounded <t/f>  Include LGBM bounded in ensemble (default true)
+# --include-lgbm-bounded-wide-N <t/f>  Include LGBM bounded wide variant N in ensemble (N=1-5)
 
 ENSEMBLE_LOOKBACK_WEEKS=""
 ENSEMBLE_HISTORY_WEEKS=""
@@ -25,7 +26,11 @@ ENSEMBLE_INCLUDE_ARIMA=""
 ENSEMBLE_INCLUDE_SVM=""
 ENSEMBLE_INCLUDE_LGBM_BLENDED=""
 ENSEMBLE_INCLUDE_LGBM_BOUNDED=""
-ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,8 +46,16 @@ while [[ $# -gt 0 ]]; do
       ENSEMBLE_INCLUDE_LGBM_BLENDED="$2"; shift 2;;
     --include-lgbm-bounded)
       ENSEMBLE_INCLUDE_LGBM_BOUNDED="$2"; shift 2;;
-    --include-lgbm-bounded-wide)
-      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE="$2"; shift 2;;
+    --include-lgbm-bounded-wide-1)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1="$2"; shift 2;;
+    --include-lgbm-bounded-wide-2)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2="$2"; shift 2;;
+    --include-lgbm-bounded-wide-3)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3="$2"; shift 2;;
+    --include-lgbm-bounded-wide-4)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4="$2"; shift 2;;
+    --include-lgbm-bounded-wide-5)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5="$2"; shift 2;;
     *)
       shift;;
   esac
@@ -100,7 +113,11 @@ echo "Cutoff (season, for ARIMA/blended residuals): $CUTOFF_SEASON"
 mkdir -p forecasts/retrospective/arima
 mkdir -p forecasts/retrospective/lgbm_blended
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded
-mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide
+mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_1
+mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_2
+mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_3
+mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_4
+mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_5
 mkdir -p forecasts/retrospective/svm_t100
 mkdir -p forecasts/prospective
 
@@ -123,10 +140,15 @@ python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF
   --models-dir models/lgbm_enhanced_t10_bounded --models-base-dir models/lgbm_enhanced_t10_bounded \
   --output-base forecasts/retrospective
 
-echo "==> Retrospective LGBM Bounded Wide (using recent cutoff)"
-python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF_RECENT" \
-  --models-dir models/lgbm_enhanced_t10_bounded_wide --models-base-dir models/lgbm_enhanced_t10_bounded_wide \
-  --output-base forecasts/retrospective
+# Run retrospective for each bounded-wide variant that exists
+for V in 1 2 3 4 5; do
+  if [[ -d "models/lgbm_enhanced_t10_bounded_wide_${V}" ]]; then
+    echo "==> Retrospective LGBM Bounded Wide ${V} (using recent cutoff)"
+    python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF_RECENT" \
+      --models-dir "models/lgbm_enhanced_t10_bounded_wide_${V}" --models-base-dir "models/lgbm_enhanced_t10_bounded_wide_${V}" \
+      --output-base forecasts/retrospective
+  fi
+done
 
 echo "==> Retrospective SVM (h=1..4)"
 for H in 1 2 3 4; do
@@ -168,16 +190,21 @@ for H in 1 2 3 4; do
     --models-output-dir models/lgbm_enhanced_t10_bounded || true
 done
 
-echo "==> Prospective LGBM Bounded Wide (h=1..4)"
-for H in 1 2 3 4; do
-  python src/generate_prosp_lgbm.py \
-    --hyperparams models/lgbm_enhanced_t10_bounded_wide/two_stage_hyperparameters_h${H}.pkl \
-    --data-file "$STITCHED" \
-    --horizon ${H} \
-    --output forecasts/prospective \
-    --model-name TwoStage-FrozenMu-bounded-wide \
-    --save-models \
-    --models-output-dir models/lgbm_enhanced_t10_bounded_wide || true
+# Run prospective for each bounded-wide variant that exists
+for V in 1 2 3 4 5; do
+  if [[ -d "models/lgbm_enhanced_t10_bounded_wide_${V}" ]]; then
+    echo "==> Prospective LGBM Bounded Wide ${V} (h=1..4)"
+    for H in 1 2 3 4; do
+      python src/generate_prosp_lgbm.py \
+        --hyperparams "models/lgbm_enhanced_t10_bounded_wide_${V}/two_stage_hyperparameters_h${H}.pkl" \
+        --data-file "$STITCHED" \
+        --horizon ${H} \
+        --output forecasts/prospective \
+        --model-name "TwoStage-FrozenMu-bounded-wide-${V}" \
+        --save-models \
+        --models-output-dir "models/lgbm_enhanced_t10_bounded_wide_${V}" || true
+    done
+  fi
 done
 
 echo "==> Prospective Adaptive Ensemble"
@@ -196,7 +223,11 @@ if [[ -n "$ENSEMBLE_INCLUDE_ARIMA" ]]; then AE_ARGS+=(--include-arima "$ENSEMBLE
 if [[ -n "$ENSEMBLE_INCLUDE_SVM" ]]; then AE_ARGS+=(--include-svm "$ENSEMBLE_INCLUDE_SVM"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BLENDED" ]]; then AE_ARGS+=(--include-lgbm-blended "$ENSEMBLE_INCLUDE_LGBM_BLENDED"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED" ]]; then AE_ARGS+=(--include-lgbm-bounded "$ENSEMBLE_INCLUDE_LGBM_BOUNDED"); fi
-if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-1 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-2 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-3 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-4 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-5 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5"); fi
 Rscript src/generate_prosp_adaptive_ensemble.R "${AE_ARGS[@]}"
 
 echo "==> Done. Outputs under forecasts/{retrospective,prospective}"

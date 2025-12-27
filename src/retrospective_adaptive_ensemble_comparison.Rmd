@@ -90,9 +90,19 @@ for (h in 1:4) {
   arima <- load_model(sprintf('../forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv', h), 'ARIMA', h)
   lgbm_blended <- load_model(sprintf('../forecasts/retrospective/lgbm_blended/LGBM-blended_h%d_forecasts.csv', h), 'LGBM_blended', h)
   lgbm_bounded <- load_model(sprintf('../forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h%d_forecasts.csv', h), 'LGBM_bounded', h)
-  lgbm_bounded_wide <- load_model(sprintf('../forecasts/retrospective/lgbm_enhanced_t10_bounded_wide/TwoStage-FrozenMu_h%d_forecasts.csv', h), 'LGBM_bounded_wide', h)
   svm <- load_model(sprintf('../forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', h), 'SVM', h)
-  dfs <- list(baseline, arima, lgbm_blended, lgbm_bounded, lgbm_bounded_wide, svm)
+  dfs <- list(baseline, arima, lgbm_blended, lgbm_bounded, svm)
+
+  # Load bounded-wide variants 1-5
+  for (v in 1:5) {
+    lgbm_bounded_wide_v <- load_model(
+      sprintf('../forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_%d/TwoStage-FrozenMu_h%d_forecasts.csv', v, h),
+      sprintf('LGBM_bounded_wide_%d', v), h)
+    if (!is.null(lgbm_bounded_wide_v)) {
+      dfs <- c(dfs, list(lgbm_bounded_wide_v))
+    }
+  }
+
   dfs <- dfs[!sapply(dfs, is.null)]
   if (length(dfs) > 0) all_models[[paste0('h', h)]] <- bind_rows(dfs)
 }

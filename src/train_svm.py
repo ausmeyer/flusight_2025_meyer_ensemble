@@ -59,7 +59,7 @@ class SVMTrainer:
     """
 
     def __init__(self, cut_off_date: str, horizon: int = 1, max_lags: int = 12,
-                 trials: int = 100, random_seed: int = 42,
+                 trials: int = 100, random_seed: int = None,
                  use_enhanced_features: bool = False, n_features: int = 5,
                  use_log_transform: bool = False,
                  residual_scale: str = 'log1p',
@@ -801,8 +801,8 @@ def main():
     # Optimization arguments
     parser.add_argument('--trials', type=int, default=100,
                        help='Number of Optuna trials (default: 100)')
-    parser.add_argument('--random-seed', type=int, default=42,
-                       help='Random seed for reproducibility (default: 42)')
+    parser.add_argument('--random-seed', type=int, default=None,
+                       help='Random seed for reproducibility (default: None for random)')
 
     args = parser.parse_args()
 

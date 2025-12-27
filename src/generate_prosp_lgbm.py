@@ -291,6 +291,9 @@ class ProspectiveForecastGenerator:
                 else:
                     dist = GaussianFrozenLoc()
                 final_stage2 = LightGBMLSS(dist)
+                # Pre-set start_values to prevent LightGBMLSS from overwriting our init_score
+                mu_mean = init_score[::2].mean()
+                final_stage2.start_values = np.array([mu_mean, 0.0], dtype=np.float32)
                 p2 = stage2_params['best_params'].copy()
                 p2['verbose'] = -1
                 p2['verbosity'] = -1
@@ -673,6 +676,9 @@ def main():
                 else:
                     dist = GaussianFrozenLoc()
                 final_stage2 = LightGBMLSS(dist)
+                # Pre-set start_values to prevent LightGBMLSS from overwriting our init_score
+                mu_mean = init_score[::2].mean()
+                final_stage2.start_values = np.array([mu_mean, 0.0], dtype=np.float32)
                 p2 = stage2_params['best_params'].copy(); p2['verbose'] = -1; p2['verbosity'] = -1
                 final_stage2.train(p2, dtrain2, num_boost_round=stage2_params['num_boost_round'])
                 generator._final_stage2_models[location] = final_stage2
@@ -705,7 +711,7 @@ def main():
                 target_date = generator.last_date + pd.Timedelta(weeks=generator.horizon)
 
                 # --- QUANTILE GENERATION ---
-                if generator.is_bounded:
+                if generator.is_bounded or generator.is_bounded_wide:
                     # BOUNDED MODE: Use Stage 2 sigma directly in log space
                     mu_log = mu_pred_raw  # Already in log space
                     dist_params = final_stage2.predict(X_pred_transformed[-1:], pred_type="parameters")

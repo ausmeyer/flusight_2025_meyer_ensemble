@@ -12,7 +12,6 @@ DATA_FILE="data/imputed_and_stitched_hosp_2025-05-24.csv"
 CUTOFF_DATE="2024-07-01"
 TRIALS=100
 N_FEATURES=10
-RANDOM_SEED=1
 
 # Define all locations - note that multi-word locations need special handling
 # We'll pass them directly to the Python script with proper quoting
@@ -51,7 +50,6 @@ for HORIZON in 1 2 3 4; do
         --trials $TRIALS \
         --n-features $N_FEATURES \
         --max-lags 8 \
-        --random-seed $RANDOM_SEED \
         --kernels rbf,linear \
         --seasonal-in-search \
         
