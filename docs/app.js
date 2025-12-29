@@ -74,7 +74,7 @@ const App = {
 
             const colorIndicator = document.createElement('span');
             colorIndicator.className = 'model-color-indicator';
-            colorIndicator.style.backgroundColor = DataLoader.modelColors[model] || '#666';
+            colorIndicator.style.backgroundColor = DataLoader.getModelColor(model);
 
             label.appendChild(checkbox);
             label.appendChild(colorIndicator);

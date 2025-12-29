@@ -24,7 +24,7 @@ const DataLoader = {
 
     fipsToName: {},
 
-    // Model configurations
+    // Local model configurations (loaded from this repo)
     modelPatterns: {
         'ARIMA': 'ARIMA_h{H}_prospective_{DATE}.csv',
         'SVM': 'SVM_h{H}_prospective_{DATE}.csv',
@@ -36,6 +36,46 @@ const DataLoader = {
         'AdaptiveEnsemble': 'AdaptiveEnsemble_prospective_{DATE}.csv'
     },
 
+    // List of local models (for ordering - these appear first in the list)
+    localModels: [
+        'AdaptiveEnsemble', 'ARIMA', 'LGBM-blended', 'LGBM-bounded',
+        'LGBM-bounded-wide-1', 'LGBM-bounded-wide-2', 'LGBM-bounded-wide-3', 'SVM'
+    ],
+
+    // GitHub CDC FluSight models (loaded from cdcepi/FluSight-forecast-hub)
+    githubModels: [
+        'CADPH-FluCAT_Ensemble', 'CEPH-Rtrend_fluH', 'CFA_Pyrenew-Pyrenew_E_Flu',
+        'CFA_Pyrenew-Pyrenew_HE_Flu', 'CFA_Pyrenew-Pyrenew_H_Flu', 'CMU-TimeSeries',
+        'CMU-climate_baseline', 'CU-ARNB_Net', 'CU-ensemble', 'Cornell_JHU-hierarchSIR',
+        'FluSight-HJudge_ensemble', 'FluSight-base_seasonal', 'FluSight-baseline',
+        'FluSight-baseline_cat', 'FluSight-ens_q_cat', 'FluSight-ensemble',
+        'FluSight-equal_cat', 'FluSight-lop_norm', 'FluSight-national_cat',
+        'FluSight-trained_mean', 'FluSight-trained_med', 'GH-model', 'GT-FluFNP',
+        'Gatech-ensemble_point', 'Gatech-ensemble_prob', 'Gatech-ensemble_stat',
+        'Google_SAI-FluBoostQR', 'Google_SAI-FluEns', 'ISU_NiemiLab-ENS',
+        'ISU_NiemiLab-GPE', 'ISU_NiemiLab-NLH', 'ISU_NiemiLab-SIR', 'JHUAPL-DMD',
+        'JHUAPL-Morris', 'JHU_CSSE-CSSE_Ensemble', 'LUcompUncertLab-chimera',
+        'LosAlamos-DoSiDo', 'LosAlamos-ThinMint', 'LosAlamos_NAU-CModel_Flu',
+        'MDPredict-SIRS', 'MIGHTE-Joint', 'MIGHTE-Nsemble', 'MOBS-EpyStrain_Flu',
+        'MOBS-GLEAM_FLUH', 'MOBS-GLEAM_RL_FLUH', 'Metaculus-cp', 'NAU-FourCAT',
+        'NAU-epymorph', 'NAU-vulPES', 'NEU_ISI-AdaptiveEnsemble', 'NEU_ISI-FluBcast',
+        'NIH-Flu_ARIMA', 'NU-PGF_FLUH', 'NU_UCSD-GLEAM_AI_FLUH', 'OHT_JHU-nbxd',
+        'PSI-PROF', 'PSI-PROF_MOA', 'PSI-PROF_beta', 'SGroup-RandomForest',
+        'SigSci-BECAM', 'SigSci-CREG', 'SigSci-TSENS', 'Stevens-GBR',
+        'Stevens-ILIForecast', 'UGA_CEID-Walk', 'UGA_CEID-auto_AVG_LB',
+        'UGA_flucast-Copycat', 'UGA_flucast-INFLAenza', 'UGA_flucast-OKeeffe',
+        'UGA_flucast-Scenariocast', 'UGuelph-CompositeCurve', 'UGuelphensemble-GRYPHON',
+        'UI_CompEpi-EpiGen', 'UM-DeepOutbreak', 'UMass-AR2', 'UMass-flusion',
+        'UMass-trends_ensemble', 'UNC_IDD-InfluPaint', 'UVAFluX-CESGCN',
+        'UVAFluX-Ensemble', 'UVAFluX-FS_OptimWISE', 'UVAFluX-OptimWISE',
+        'VTSanghani-Ensemble', 'VTSanghani-PRIME', 'cfa-flumech',
+        'cfarenewal-cfaepimlight', 'fjordhest-ensemble'
+    ],
+
+    // GitHub base URL for CDC FluSight models
+    cdcGithubBaseUrl: 'https://raw.githubusercontent.com/cdcepi/FluSight-forecast-hub/main/model-output',
+
+    // Base colors for local models
     modelColors: {
         'AdaptiveEnsemble': '#cc5200',
         'ARIMA': '#1f77b4',
@@ -56,6 +96,38 @@ const DataLoader = {
         'LGBM-bounded-wide-1': 'rgba(140, 86, 75, 0.2)',
         'LGBM-bounded-wide-2': 'rgba(23, 190, 207, 0.2)',
         'LGBM-bounded-wide-3': 'rgba(188, 189, 34, 0.2)'
+    },
+
+    // Generate a color based on model name (deterministic hash)
+    getModelColor(modelName) {
+        if (this.modelColors[modelName]) {
+            return this.modelColors[modelName];
+        }
+        // Generate a deterministic color based on model name hash
+        let hash = 0;
+        for (let i = 0; i < modelName.length; i++) {
+            hash = modelName.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const h = Math.abs(hash) % 360;
+        const s = 50 + (Math.abs(hash >> 8) % 30);  // 50-80% saturation
+        const l = 40 + (Math.abs(hash >> 16) % 20); // 40-60% lightness
+        return `hsl(${h}, ${s}%, ${l}%)`;
+    },
+
+    getModelFill(modelName) {
+        if (this.modelFills[modelName]) {
+            return this.modelFills[modelName];
+        }
+        // Generate fill color based on the line color
+        const color = this.getModelColor(modelName);
+        if (color.startsWith('hsl')) {
+            // Extract HSL values and add alpha
+            const match = color.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
+            if (match) {
+                return `hsla(${match[1]}, ${match[2]}%, ${match[3]}%, 0.2)`;
+            }
+        }
+        return 'rgba(128, 128, 128, 0.2)';
     },
 
     // Quantile levels we care about
@@ -271,6 +343,64 @@ const DataLoader = {
     },
 
     /**
+     * Load forecast from CDC GitHub for a specific model and date
+     */
+    async loadGithubForecast(modelName, dateStr) {
+        // Convert YYYYMMDD to YYYY-MM-DD format for CDC URLs
+        const cdcDate = `${dateStr.slice(0,4)}-${dateStr.slice(4,6)}-${dateStr.slice(6,8)}`;
+        const url = `${this.cdcGithubBaseUrl}/${modelName}/${cdcDate}-${modelName}.csv`;
+
+        try {
+            const response = await fetch(url);
+            if (!response.ok) return null;
+
+            const text = await response.text();
+            const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+
+            return parsed.data
+                .filter(row => row.output_type === 'quantile' &&
+                               row.target === 'wk inc flu hosp' &&
+                               parseInt(row.horizon) >= 0)
+                .map(row => {
+                    let location = String(row.location);
+                    if (location !== 'US' && !isNaN(parseInt(location))) {
+                        location = location.padStart(2, '0');
+                    }
+                    return {
+                        model: modelName,
+                        referenceDate: new Date(row.reference_date),
+                        horizon: parseInt(row.horizon) + 1,
+                        targetEndDate: new Date(row.target_end_date),
+                        location: location,
+                        quantile: parseFloat(row.output_type_id),
+                        value: parseFloat(row.value)
+                    };
+                })
+                .filter(row => !isNaN(row.value));
+        } catch (e) {
+            // Silently fail for GitHub models - they may not have all dates
+            return null;
+        }
+    },
+
+    /**
+     * Try to load a GitHub forecast, falling back to older dates if needed
+     * Only returns data if forecast exists since 2025-11-01
+     */
+    async loadGithubForecastWithFallback(modelName) {
+        // Only try dates since 11/1/2025 (2025-11-01)
+        const datesToTry = ['20251227', '20251220', '20251213', '20251206', '20251129', '20251122', '20251115', '20251108', '20251101'];
+
+        for (const dateStr of datesToTry) {
+            const data = await this.loadGithubForecast(modelName, dateStr);
+            if (data && data.length > 0) {
+                return { data, date: dateStr };
+            }
+        }
+        return null;
+    },
+
+    /**
      * Load all forecasts, trying multiple dates for each model
      */
     async loadAllForecasts() {
@@ -280,6 +410,7 @@ const DataLoader = {
 
         const loadPromises = [];
 
+        // Load local models
         for (const model of models) {
             if (model === 'AdaptiveEnsemble') {
                 // Ensemble file contains all horizons
@@ -311,6 +442,17 @@ const DataLoader = {
             }
         }
 
+        // Load GitHub models (all contain all horizons in one file)
+        for (const model of this.githubModels) {
+            loadPromises.push(
+                this.loadGithubForecastWithFallback(model).then(result => {
+                    if (result) {
+                        this.forecasts[model] = result.data;
+                    }
+                })
+            );
+        }
+
         await Promise.all(loadPromises);
 
         if (latestDateFound) {
@@ -327,9 +469,11 @@ const DataLoader = {
     getForecastSummary(modelName, location) {
         const results = [];
 
-        // Handle AdaptiveEnsemble (single file with all horizons)
-        if (modelName === 'AdaptiveEnsemble' && this.forecasts['AdaptiveEnsemble']) {
-            const data = this.forecasts['AdaptiveEnsemble']
+        // Check if model has a single combined file (AdaptiveEnsemble or GitHub models)
+        const hasCombinedFile = this.forecasts[modelName] !== undefined;
+
+        if (hasCombinedFile) {
+            const data = this.forecasts[modelName]
                 .filter(row => row.location === location);
 
             // Group by target date
@@ -353,7 +497,7 @@ const DataLoader = {
                 });
             }
         } else {
-            // Combine all horizon files for this model
+            // Combine all horizon files for this model (local models with separate h files)
             for (let h = 1; h <= 4; h++) {
                 const key = `${modelName}_h${h}`;
                 if (!this.forecasts[key]) continue;
@@ -427,26 +571,29 @@ const DataLoader = {
 
     /**
      * Get list of available models
+     * Returns local models first (in defined order), then GitHub models alphabetically
      */
     getAvailableModels() {
-        const models = new Set();
+        const loadedModels = new Set();
 
         for (const key of Object.keys(this.forecasts)) {
-            if (key === 'AdaptiveEnsemble') {
-                models.add('AdaptiveEnsemble');
-            } else {
+            // Check if it's a combined file (direct model name) or horizon-split file (model_h1)
+            if (key.match(/_h\d$/)) {
                 // Extract model name from key like "ARIMA_h1"
                 const modelName = key.replace(/_h\d$/, '');
-                models.add(modelName);
+                loadedModels.add(modelName);
+            } else {
+                // Combined file - key is the model name
+                loadedModels.add(key);
             }
         }
 
-        // Sort with AdaptiveEnsemble first, then alphabetically
-        const sorted = Array.from(models).sort();
-        if (sorted.includes('AdaptiveEnsemble')) {
-            return ['AdaptiveEnsemble', ...sorted.filter(m => m !== 'AdaptiveEnsemble')];
-        }
-        return sorted;
+        // Separate into local and GitHub models
+        const localLoaded = this.localModels.filter(m => loadedModels.has(m));
+        const githubLoaded = this.githubModels.filter(m => loadedModels.has(m)).sort();
+
+        // Return local models first (in defined order), then GitHub models alphabetically
+        return [...localLoaded, ...githubLoaded];
     },
 
     /**

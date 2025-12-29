@@ -41,8 +41,8 @@ const ChartUtils = {
             const forecastData = DataLoader.getForecastSummary(model, location);
             if (forecastData.length === 0) continue;
 
-            const color = DataLoader.modelColors[model] || '#666666';
-            const fillColor = DataLoader.modelFills[model] || 'rgba(100, 100, 100, 0.2)';
+            const color = DataLoader.getModelColor(model);
+            const fillColor = DataLoader.getModelFill(model);
 
             // 95% CI band (if enabled)
             if (options.show95CI !== false) {
@@ -68,7 +68,13 @@ const ChartUtils = {
 
             // 50% CI band (if enabled)
             if (options.show50CI !== false) {
-                const fillColor50 = fillColor.replace('0.2)', '0.35)');
+                // Handle both rgba and hsla formats
+                let fillColor50 = fillColor;
+                if (fillColor.includes('0.2)')) {
+                    fillColor50 = fillColor.replace('0.2)', '0.35)');
+                } else if (fillColor.includes('hsla')) {
+                    fillColor50 = fillColor.replace(/,\s*0\.2\)$/, ', 0.35)');
+                }
                 datasets.push({
                     label: `${model} 50% CI`,
                     data: forecastData.map(d => ({ x: d.date, y: d.q75 })),
