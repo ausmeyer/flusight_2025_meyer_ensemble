@@ -33,8 +33,6 @@ const DataLoader = {
         'LGBM-bounded-wide-1': 'TwoStage-FrozenMu-bounded-wide-1_h{H}_prospective_{DATE}.csv',
         'LGBM-bounded-wide-2': 'TwoStage-FrozenMu-bounded-wide-2_h{H}_prospective_{DATE}.csv',
         'LGBM-bounded-wide-3': 'TwoStage-FrozenMu-bounded-wide-3_h{H}_prospective_{DATE}.csv',
-        'LGBM-bounded-wide-4': 'TwoStage-FrozenMu-bounded-wide-4_h{H}_prospective_{DATE}.csv',
-        'LGBM-bounded-wide-5': 'TwoStage-FrozenMu-bounded-wide-5_h{H}_prospective_{DATE}.csv',
         'AdaptiveEnsemble': 'AdaptiveEnsemble_prospective_{DATE}.csv'
     },
 
@@ -46,9 +44,7 @@ const DataLoader = {
         'LGBM-bounded': '#e377c2',
         'LGBM-bounded-wide-1': '#8c564b',
         'LGBM-bounded-wide-2': '#17becf',
-        'LGBM-bounded-wide-3': '#bcbd22',
-        'LGBM-bounded-wide-4': '#7f7f7f',
-        'LGBM-bounded-wide-5': '#d62728'
+        'LGBM-bounded-wide-3': '#bcbd22'
     },
 
     modelFills: {
@@ -59,9 +55,7 @@ const DataLoader = {
         'LGBM-bounded': 'rgba(227, 119, 194, 0.2)',
         'LGBM-bounded-wide-1': 'rgba(140, 86, 75, 0.2)',
         'LGBM-bounded-wide-2': 'rgba(23, 190, 207, 0.2)',
-        'LGBM-bounded-wide-3': 'rgba(188, 189, 34, 0.2)',
-        'LGBM-bounded-wide-4': 'rgba(127, 127, 127, 0.2)',
-        'LGBM-bounded-wide-5': 'rgba(214, 39, 40, 0.2)'
+        'LGBM-bounded-wide-3': 'rgba(188, 189, 34, 0.2)'
     },
 
     // Quantile levels we care about
