@@ -231,9 +231,15 @@ const DataLoader = {
                     if (location !== 'US' && !isNaN(parseInt(location))) {
                         location = location.padStart(2, '0');
                     }
+                    // Base models use data cutoff date as reference_date, but CDC convention
+                    // uses the Saturday after (+7 days). AdaptiveEnsemble already uses CDC convention.
+                    let refDate = new Date(row.reference_date);
+                    if (modelName !== 'AdaptiveEnsemble') {
+                        refDate.setDate(refDate.getDate() + 7);
+                    }
                     return {
                         model: modelName,
-                        referenceDate: new Date(row.reference_date),
+                        referenceDate: refDate,
                         horizon: modelName === 'AdaptiveEnsemble' ? parseInt(row.horizon) + 1 : horizon,
                         targetEndDate: new Date(row.target_end_date),
                         location: location,
