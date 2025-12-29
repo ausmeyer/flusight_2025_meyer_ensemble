@@ -638,7 +638,7 @@ class BatchRetrospectiveForecastGenerator:
                     # --- QUANTILE GENERATION ---
                     from scipy.stats import norm
 
-                    if is_bounded:
+                    if is_bounded or is_bounded_wide:
                         # BOUNDED MODE: Use Stage 2 sigma directly in log space
                         # mu_pred_raw is already in log space (because use_log_transform=True for bounded)
                         mu_log = mu_pred_raw
@@ -745,7 +745,7 @@ class BatchRetrospectiveForecastGenerator:
                     continue
 
             all_forecasts[location] = forecast_results
-            if is_bounded:
+            if is_bounded or is_bounded_wide:
                 print(f"    Generated {len(forecast_results)} forecasts (bounded log-space sigma)")
             else:
                 print(f"    Generated {len(forecast_results)} forecasts (conformal after {MIN_RESIDUALS_FOR_CONFORMAL} residuals)")

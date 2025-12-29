@@ -27,6 +27,7 @@ library(lubridate)
 library(tidyr)
 library(ggplot2)
 library(knitr)
+library(scoringutils)
 ```
 
 Generated on: `r Sys.time()`
@@ -34,18 +35,9 @@ Generated on: `r Sys.time()`
 # Retrospective WIS Evaluation
 
 ```{r pipeline-wis}
-# Per-horizon evaluation start dates based on first forecast with ground truth
-# Reference date 2025-11-15 produces:
-#   h1 (CDC h0) target_end_date = 2025-11-22
-#   h2 (CDC h1) target_end_date = 2025-11-29
-#   h3 (CDC h2) target_end_date = 2025-12-06
-#   h4 (CDC h3) target_end_date = 2025-12-13
-EVAL_START_BY_HORIZON <- c(
-  `1` = as.Date('2025-11-22'),
-  `2` = as.Date('2025-11-29'),
-  `3` = as.Date('2025-12-06'),
-  `4` = as.Date('2025-12-13')
-)
+# Reference dates to include in evaluation (matches Reich lab dashboard 2025-2026 season)
+# These are the CDC submission dates for the current season
+EVAL_REFERENCE_DATES <- as.Date(c('2025-11-22', '2025-11-29', '2025-12-06', '2025-12-13', '2025-12-20'))
 
 # Helper: latest file in a directory by pattern
 latest_file <- function(dir, pattern) {
@@ -75,73 +67,116 @@ actual_data <- actual_raw %>%
   filter(!is.na(location))
 
 # Load model retrospective files for h=1..4
-load_model <- function(path, model_name, h){
+# NOTE: Local models use data cutoff date as reference_date, but CDC convention uses
+# the Saturday after (reference_date + 7 days). We add 7 days to align with GitHub submissions.
+# NOTE: Local files already have CDC horizon convention (0-3) in the 'horizon' column,
+#       we just use that directly as 'h'.
+load_model <- function(path, model_name, h_file){
   if (!file.exists(path)) return(NULL)
   df <- read_csv(path, show_col_types = FALSE)
   df$model <- model_name
-  df$h <- h
-  df <- df %>% mutate(reference_date = as.Date(reference_date), target_end_date = as.Date(target_end_date))
+  df$h <- as.integer(df$horizon)  # Use horizon from file directly (already CDC convention 0-3)
+  df <- df %>% mutate(
+    reference_date = as.Date(reference_date),  # Already CDC convention
+    target_end_date = as.Date(target_end_date)
+  )
   df
 }
 
-all_models <- list()
-for (h in 1:4) {
-  baseline <- load_model(sprintf('../forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', h), 'FluSight-baseline', h)
-  arima <- load_model(sprintf('../forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv', h), 'ARIMA', h)
-  lgbm_blended <- load_model(sprintf('../forecasts/retrospective/lgbm_blended/LGBM-blended_h%d_forecasts.csv', h), 'LGBM_blended', h)
-  lgbm_bounded <- load_model(sprintf('../forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h%d_forecasts.csv', h), 'LGBM_bounded', h)
-  svm <- load_model(sprintf('../forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', h), 'SVM', h)
+# Load local models - file names use h=1-4, but horizon column inside already has CDC convention 0-3
+all_model_dfs <- list()
+for (h_file in 1:4) {
+  baseline <- load_model(sprintf('../forecasts/retrospective/Flusight-baseline_h%d_forecasts.csv', h_file), 'FluSight-baseline', h_file)
+  arima <- load_model(sprintf('../forecasts/retrospective/arima/ARIMA_h%d_forecasts.csv', h_file), 'ARIMA', h_file)
+  lgbm_blended <- load_model(sprintf('../forecasts/retrospective/lgbm_blended/LGBM-blended_h%d_forecasts.csv', h_file), 'LGBM_blended', h_file)
+  lgbm_bounded <- load_model(sprintf('../forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h%d_forecasts.csv', h_file), 'LGBM_bounded', h_file)
+  svm <- load_model(sprintf('../forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', h_file), 'SVM', h_file)
   dfs <- list(baseline, arima, lgbm_blended, lgbm_bounded, svm)
 
   # Load bounded-wide variants 1-5
   for (v in 1:5) {
     lgbm_bounded_wide_v <- load_model(
-      sprintf('../forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_%d/TwoStage-FrozenMu_h%d_forecasts.csv', v, h),
-      sprintf('LGBM_bounded_wide_%d', v), h)
+      sprintf('../forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_%d/TwoStage-FrozenMu_h%d_forecasts.csv', v, h_file),
+      sprintf('LGBM_bounded_wide_%d', v), h_file)
     if (!is.null(lgbm_bounded_wide_v)) {
       dfs <- c(dfs, list(lgbm_bounded_wide_v))
     }
   }
 
   dfs <- dfs[!sapply(dfs, is.null)]
-  if (length(dfs) > 0) all_models[[paste0('h', h)]] <- bind_rows(dfs)
+  if (length(dfs) > 0) all_model_dfs[[h_file]] <- bind_rows(dfs)
 }
+# Combine all local models into one dataframe (h column already has correct CDC convention)
+all_local_models <- bind_rows(all_model_dfs)
 
-# Load AdaptiveEnsemble from multiple retrospective files
-# Ensemble uses CDC horizon convention (0-3), we need to convert to internal (1-4)
-ensemble_files <- list.files('../forecasts/retrospective/ensemble', pattern = '^AdaptiveEnsemble_retrospective_.*\\.csv$', full.names = TRUE)
-if (length(ensemble_files) > 0) {
-  ensemble_list <- lapply(ensemble_files, function(f) {
-    df <- read_csv(f, show_col_types = FALSE)
-    df <- df %>%
-      filter(output_type == 'quantile') %>%
-      mutate(
-        model = 'AdaptiveEnsemble',
-        h = as.integer(horizon) + 1,  # Convert CDC horizon (0-3) to internal (1-4)
-        reference_date = as.Date(reference_date),
-        target_end_date = as.Date(target_end_date)
-      )
-    df
-  })
-  ensemble_all <- bind_rows(ensemble_list)
+# Load AdaptiveEnsemble and FluSight-baseline from CDC GitHub
+# This ensures we're scoring the actual submitted forecasts and using the official baseline
+# Models use CDC horizon convention (0-3), we need to convert to internal (1-4)
+github_base_url <- 'https://raw.githubusercontent.com/cdcepi/FluSight-forecast-hub/main/model-output'
 
-  # Add ensemble to all_models by horizon
-  for (h in 1:4) {
-    ens_h <- ensemble_all %>% filter(h == !!h)
-    if (nrow(ens_h) > 0) {
-      if (paste0('h', h) %in% names(all_models)) {
-        all_models[[paste0('h', h)]] <- bind_rows(all_models[[paste0('h', h)]], ens_h)
-      } else {
-        all_models[[paste0('h', h)]] <- ens_h
-      }
-    }
+# 2025-26 season CDC dates available on GitHub
+github_dates <- c('2025-11-22', '2025-11-29', '2025-12-06', '2025-12-13', '2025-12-20')
+
+# Helper function to load model from GitHub
+load_github_model <- function(model_dir, model_name, internal_name, dates) {
+  model_list <- list()
+  for (cdc_date in dates) {
+    url <- sprintf('%s/%s/%s-%s.csv', github_base_url, model_dir, cdc_date, model_name)
+
+    tryCatch({
+      df <- read_csv(url, show_col_types = FALSE)
+      df <- df %>%
+        filter(output_type == 'quantile',
+               horizon >= 0,  # Exclude negative horizons
+               target == 'wk inc flu hosp') %>%  # Only hospitalization target, not ED visits
+        mutate(
+          model = internal_name,
+          h = as.integer(horizon),  # Keep CDC horizon convention (0-3)
+          reference_date = as.Date(reference_date),
+          target_end_date = as.Date(target_end_date),
+          output_type_id = as.numeric(output_type_id),  # Ensure numeric for binding
+          location = sprintf('%02s', location)  # Ensure 2-char format for location
+        )
+      model_list[[cdc_date]] <- df
+    }, error = function(e) {
+      message(sprintf("Could not fetch %s from GitHub for %s: %s", model_name, cdc_date, e$message))
+    })
   }
+  if (length(model_list) > 0) bind_rows(model_list) else NULL
 }
 
-stopifnot(length(all_models) > 0)
-ret_all <- bind_rows(all_models)
+# Load AdaptiveEnsemble (MIGHTE-Nsemble) from GitHub
+ensemble_all <- load_github_model('MIGHTE-Nsemble', 'MIGHTE-Nsemble', 'AdaptiveEnsemble', github_dates)
 
-# WIS function (standard scale, matching scoringutils/hubEvals)
+# Load FluSight-baseline from GitHub (official baseline for relative WIS calculation)
+baseline_github <- load_github_model('FluSight-baseline', 'FluSight-baseline', 'FluSight-baseline', github_dates)
+
+# Combine all models: start with local models, replace local baseline with GitHub version,
+# and add AdaptiveEnsemble from GitHub
+ret_all <- all_local_models
+
+# Replace local baseline with GitHub baseline if available
+if (!is.null(baseline_github)) {
+  ret_all <- ret_all %>% filter(model != 'FluSight-baseline')
+  ret_all <- bind_rows(ret_all, baseline_github)
+}
+
+# Add AdaptiveEnsemble from GitHub
+if (!is.null(ensemble_all)) {
+  ret_all <- bind_rows(ret_all, ensemble_all)
+}
+
+# Deduplicate: For each (model, h, location, target_end_date), keep only the row from
+# the correct reference_date. The correct reference_date for a given (h, target_end_date)
+# is target_end_date - (h * 7 days). This matches how the Reich lab evaluates forecasts.
+ret_all <- ret_all %>%
+  mutate(expected_ref_date = as.Date(target_end_date) - (h * 7)) %>%
+  filter(as.Date(reference_date) == expected_ref_date) %>%
+  select(-expected_ref_date)
+
+stopifnot(nrow(ret_all) > 0)
+
+# Use scoringutils::wis for WIS calculation (matches hubEvals/Reich lab dashboard)
 calculate_wis_single <- function(qvals, qlevels, actual_value){
   if (length(actual_value) == 0 || all(is.na(actual_value))) return(NA_real_)
   qv <- as.numeric(qvals)
@@ -152,93 +187,97 @@ calculate_wis_single <- function(qvals, qlevels, actual_value){
   qv <- qv[keep]; ql <- ql[keep]
   if (length(qv) == 0 || length(ql) == 0) return(NA_real_)
 
-  # Get unique alpha levels (for symmetric intervals)
-  alphas <- unique(c(ql[ql <= 0.5], 1 - ql[ql > 0.5]))
-  alphas <- alphas[is.finite(alphas) & alphas > 0]
-  if (length(alphas) == 0) return(NA_real_)
+  # Sort by quantile level
+  ord <- order(ql)
+  qv <- qv[ord]
+  ql <- ql[ord]
 
-  scores <- sapply(alphas, function(a){
-    li <- suppressWarnings(which.min(abs(ql - a)))
-    ui <- suppressWarnings(which.min(abs(ql - (1 - a))))
-    if (length(li) == 0 || length(ui) == 0 || is.na(li) || is.na(ui)) return(NA_real_)
-    L <- qv[li]; U <- qv[ui]
-    if (!is.finite(L) || !is.finite(U)) return(NA_real_)
-    width <- U - L
-    pen <- if (y < L) (2/a) * (L - y) else if (y > U) (2/a) * (y - U) else 0
-    if (is.finite(width) && is.finite(pen)) (a/2) * (width + pen) else NA_real_
-  })
-  if (all(is.na(scores))) NA_real_ else sum(scores, na.rm = TRUE)
+  # Use scoringutils::wis directly
+  tryCatch({
+    scoringutils::wis(
+      observed = y,
+      predicted = qv,
+      quantile_level = ql,
+      weigh = TRUE,
+      count_median_twice = FALSE
+    )
+  }, error = function(e) NA_real_)
 }
 
-# Compute WIS per horizon with horizon-specific start dates
+# Compute WIS - filter by reference date (same dates for all horizons, matching Reich lab)
 wis_scores_all <- list()
 for (h in sort(unique(ret_all$h))) {
-  eval_start_h <- EVAL_START_BY_HORIZON[as.character(h)]
-
   dfh <- ret_all %>%
-    filter(h == !!h, output_type == 'quantile', as.Date(target_end_date) >= eval_start_h) %>%
+    filter(h == !!h, output_type == 'quantile', as.Date(reference_date) %in% EVAL_REFERENCE_DATES) %>%
     mutate(output_type_id = as.numeric(output_type_id))
   if (nrow(dfh) == 0) next
 
-  wis_scores <- dfh %>%
+  grouped <- dfh %>%
     group_by(h, model, reference_date, target_end_date, location) %>%
-    summarise(quantile_values = list(value), quantile_levels = list(output_type_id), .groups = 'drop') %>%
-    left_join(actual_data, by = c('target_end_date' = 'date', 'location' = 'location')) %>%
+    summarise(quantile_values = list(value), quantile_levels = list(output_type_id), .groups = 'drop')
+
+  with_actual <- grouped %>%
+    left_join(actual_data, by = c('target_end_date' = 'date', 'location' = 'location'))
+
+  wis_scores <- with_actual %>%
     filter(!is.na(actual_value)) %>%
     rowwise() %>%
     mutate(interval_score = calculate_wis_single(unlist(quantile_values), unlist(quantile_levels), actual_value)) %>%
     ungroup()
+
   wis_scores_all[[paste0('h', h)]] <- wis_scores
 }
 
-wis_scores_all_df <- bind_rows(wis_scores_all) %>% filter(!(location %in% c('72','US')))
+# Exclude only US national for state-level evaluation (Reich lab dashboard includes Puerto Rico)
+wis_scores_all_df <- bind_rows(wis_scores_all) %>% filter(location != 'US')
 
-# Ensure identical date/location sets across models within each horizon
-wis_common_list <- list()
-for (hh in sort(unique(wis_scores_all_df$h))) {
-  sub <- wis_scores_all_df %>% filter(h == !!hh)
-  models_present <- unique(sub$model)
-  keys <- sub %>%
-    group_by(location, target_end_date) %>%
-    summarise(n_models = n_distinct(model), .groups='drop') %>%
-    filter(n_models == length(models_present)) %>%
-    select(location, target_end_date)
-  sub_common <- sub %>% inner_join(keys, by=c('location','target_end_date'))
-  wis_common_list[[paste0('h', hh)]] <- sub_common
+# For relative WIS calculation, we need common (location, target_end_date, h) units
+# between each model and the baseline (FluSight-baseline)
+# This matches Reich lab dashboard which scores each model based on overlap with baseline
+
+# Get baseline coverage
+baseline_coverage <- wis_scores_all_df %>%
+  filter(model == 'FluSight-baseline') %>%
+  select(h, location, target_end_date, reference_date)
+
+# For each model, find common units with baseline
+wis_scores_common <- wis_scores_all_df %>%
+  semi_join(baseline_coverage, by = c('h', 'location', 'target_end_date'))
+
+# Pairwise relative WIS calculation (matches scoringutils/Reich lab dashboard methodology)
+# For each (location, target_end_date) unit, compute ratio of each model's WIS to baseline's WIS
+# Then take geometric mean across all units for each model
+
+compute_pairwise_relative_wis <- function(df, baseline_model = 'FluSight-baseline') {
+  # Ensure h is integer for proper joining
+  df <- df %>% mutate(h = as.integer(h))
+
+  # Get baseline WIS for each unit
+  baseline_wis <- df %>%
+    filter(model == baseline_model) %>%
+    select(h, location, target_end_date, baseline_wis = interval_score)
+
+  # Join and compute ratio for each model's forecast unit
+  df_with_ratio <- df %>%
+    left_join(baseline_wis, by = c('h', 'location', 'target_end_date')) %>%
+    filter(!is.na(baseline_wis), baseline_wis > 0) %>%
+    mutate(wis_ratio = interval_score / baseline_wis)
+
+  # Geometric mean of ratios per model (this is the "theta" in scoringutils)
+  df_with_ratio %>%
+    group_by(h, model) %>%
+    summarise(
+      relative_wis = exp(mean(log(wis_ratio), na.rm = TRUE)),
+      geometric_mean_wis = exp(mean(log(interval_score), na.rm = TRUE)),
+      n_units = n(),
+      .groups = 'drop'
+    )
 }
 
-wis_scores_common <- bind_rows(wis_common_list)
-
-cat("\nEVALUATION INFO:\n")
-cat("Per-horizon evaluation start dates:\n")
-for (hh in names(EVAL_START_BY_HORIZON)) {
-  cat(sprintf("  Horizon %s: target_end_date >= %s\n", hh, as.character(EVAL_START_BY_HORIZON[hh])))
-}
-cat("\nCommon evaluation set date range per horizon:\n")
-print(wis_scores_common %>% group_by(h) %>% summarise(start=min(target_end_date), end=max(target_end_date), n_dates=n_distinct(target_end_date)))
-
-# Per-horizon geometric mean WIS and relative WIS
-wis_by_model <- wis_scores_common %>%
-  group_by(h, model, location) %>%
-  summarise(mean_wis_loc = mean(interval_score, na.rm=TRUE), .groups='drop') %>%
-  group_by(h, model) %>%
-  summarise(geometric_mean_wis = exp(mean(log(mean_wis_loc), na.rm=TRUE)), .groups='drop')
-
-per_horizon_summary <- wis_by_model %>%
-  group_by(h) %>%
-  mutate(baseline_gmw = dplyr::first(geometric_mean_wis[model == 'FluSight-baseline'])) %>%
-  mutate(relative_wis = ifelse(!is.na(baseline_gmw) & baseline_gmw > 0,
-                               geometric_mean_wis / baseline_gmw,
-                               NA_real_)) %>%
-  select(-baseline_gmw) %>%
-  ungroup() %>%
+per_horizon_summary <- compute_pairwise_relative_wis(wis_scores_common) %>%
   arrange(h, is.na(relative_wis), relative_wis)
 
-cat("\n\nPER-HORIZON GEOMETRIC MEAN WIS AND RELATIVE WIS:\n\n")
-print(knitr::kable(per_horizon_summary, digits = 4))
-
 # Combined across horizons - only include models with all available horizons
-# First, find how many horizons have data
 n_horizons_with_data <- n_distinct(wis_scores_common$h)
 
 models_with_all_horizons <- wis_scores_common %>%
@@ -247,22 +286,41 @@ models_with_all_horizons <- wis_scores_common %>%
   filter(n_horizons == n_horizons_with_data) %>%
   pull(model)
 
-combined_by_model <- wis_scores_common %>%
-  filter(model %in% models_with_all_horizons) %>%
-  group_by(model, location) %>%
-  summarise(mean_wis_loc = mean(interval_score, na.rm=TRUE), .groups='drop') %>%
+# For combined, compute pairwise relative WIS across all horizons together
+wis_common_all_h <- wis_scores_common %>%
+  filter(model %in% models_with_all_horizons)
+
+# Get baseline WIS for each unit (ignoring horizon for combined calculation)
+baseline_wis_combined <- wis_common_all_h %>%
+  filter(model == 'FluSight-baseline') %>%
+  select(location, target_end_date, h, baseline_wis = interval_score)
+
+combined_with_ratio <- wis_common_all_h %>%
+  left_join(baseline_wis_combined, by = c('location', 'target_end_date', 'h')) %>%
+  filter(!is.na(baseline_wis), baseline_wis > 0) %>%
+  mutate(wis_ratio = interval_score / baseline_wis)
+
+combined_summary <- combined_with_ratio %>%
   group_by(model) %>%
-  summarise(geometric_mean_wis = exp(mean(log(mean_wis_loc), na.rm=TRUE)), .groups='drop')
-
-combined_summary <- combined_by_model %>%
-  mutate(baseline_gmw = dplyr::first(geometric_mean_wis[model == 'FluSight-baseline'])) %>%
-  mutate(relative_wis = ifelse(!is.na(baseline_gmw) & baseline_gmw > 0,
-                               geometric_mean_wis / baseline_gmw,
-                               NA_real_)) %>%
-  select(-baseline_gmw) %>%
+  summarise(
+    relative_wis = exp(mean(log(wis_ratio), na.rm = TRUE)),
+    geometric_mean_wis = exp(mean(log(interval_score), na.rm = TRUE)),
+    n_units = n(),
+    .groups = 'drop'
+  ) %>%
   arrange(is.na(relative_wis), relative_wis)
+```
 
-cat(sprintf("\n\nCOMBINED GEOMETRIC MEAN WIS AND RELATIVE WIS (Horizons 1-%d):\n\n", n_horizons_with_data))
-cat(sprintf("Note: Only models with data for all %d horizons with ground truth are included.\n", n_horizons_with_data))
-print(knitr::kable(combined_summary, digits = 4))
+## Per-Horizon Results
+
+```{r per-horizon-table}
+knitr::kable(per_horizon_summary, digits = 4, caption = "Per-Horizon Geometric Mean WIS and Relative WIS (Pairwise method)")
+```
+
+## Combined Results
+
+Pairwise method: For each (location, date, horizon) unit, compute ratio of model WIS to FluSight-baseline WIS. Relative WIS = geometric mean of these ratios across all units.
+
+```{r combined-table}
+knitr::kable(combined_summary, digits = 4, caption = sprintf("Combined Geometric Mean WIS and Relative WIS (Horizons 0-%d)", n_horizons_with_data - 1))
 ```
