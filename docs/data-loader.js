@@ -125,7 +125,7 @@ const DataLoader = {
         }
 
         // Also try recent specific dates we know exist
-        dates.push('20251213', '20251206', '20251129', '20251122', '20251115', '20251108', '20251101');
+        dates.push('20251227', '20251220', '20251213', '20251206', '20251129', '20251122', '20251115', '20251108');
 
         // Remove duplicates and sort descending
         const uniqueDates = [...new Set(dates)].sort().reverse();
@@ -175,7 +175,7 @@ const DataLoader = {
         const baseUrl = this.getBaseUrl();
 
         // Try to find the latest imputed data file
-        const dates = ['2025-12-06', '2025-11-29', '2025-11-22', '2025-11-15', '2025-11-01', '2025-09-27'];
+        const dates = ['2025-12-27', '2025-12-20', '2025-12-13', '2025-12-06', '2025-11-29', '2025-11-22', '2025-11-15', '2025-11-01'];
 
         for (const dateStr of dates) {
             const url = `${baseUrl}/data/imputed_sets/imputed_and_stitched_hosp_${dateStr}.csv`;
@@ -259,7 +259,7 @@ const DataLoader = {
      */
     async loadForecastWithFallback(modelName, horizon) {
         // Try multiple dates in descending order
-        const datesToTry = ['20251213', '20251206', '20251129', '20251122', '20251115', '20251108'];
+        const datesToTry = ['20251227', '20251220', '20251213', '20251206', '20251129', '20251122', '20251115', '20251108'];
 
         for (const dateStr of datesToTry) {
             const data = await this.loadForecast(modelName, horizon, dateStr);
