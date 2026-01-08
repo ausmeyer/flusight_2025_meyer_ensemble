@@ -264,14 +264,10 @@ const DataLoader = {
         const baseUrl = this.getBaseUrl();
         let url;
 
-        if (modelName === 'AdaptiveEnsemble') {
-            url = `${baseUrl}/forecasts/prospective/AdaptiveEnsemble_prospective_${dateStr}.csv`;
-        } else {
-            const pattern = this.modelPatterns[modelName];
-            if (!pattern) return null;
-            const filename = pattern.replace('{H}', horizon).replace('{DATE}', dateStr);
-            url = `${baseUrl}/forecasts/prospective/${filename}`;
-        }
+        const pattern = this.modelPatterns[modelName];
+        if (!pattern) return null;
+        const filename = pattern.replace('{H}', horizon).replace('{DATE}', dateStr);
+        url = `${baseUrl}/forecasts/prospective/${filename}`;
 
         try {
             const response = await fetch(url);
@@ -289,15 +285,13 @@ const DataLoader = {
                         location = location.padStart(2, '0');
                     }
                     // Base models use data cutoff date as reference_date, but CDC convention
-                    // uses the Saturday after (+7 days). AdaptiveEnsemble already uses CDC convention.
+                    // uses the Saturday after (+7 days).
                     let refDate = new Date(row.reference_date);
-                    if (modelName !== 'AdaptiveEnsemble') {
-                        refDate.setDate(refDate.getDate() + 7);
-                    }
+                    refDate.setDate(refDate.getDate() + 7);
                     return {
                         model: modelName,
                         referenceDate: refDate,
-                        horizon: modelName === 'AdaptiveEnsemble' ? parseInt(row.horizon) + 1 : horizon,
+                        horizon: horizon,
                         targetEndDate: new Date(row.target_end_date),
                         location: location,
                         quantile: parseFloat(row.output_type_id),
@@ -439,7 +433,7 @@ const DataLoader = {
     getForecastSummary(modelName, location) {
         const results = [];
 
-        // Check if model has a single combined file (AdaptiveEnsemble or GitHub models)
+        // Check if model has a single combined file (GitHub models have all horizons in one file)
         const hasCombinedFile = this.forecasts[modelName] !== undefined;
 
         if (hasCombinedFile) {
