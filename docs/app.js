@@ -61,8 +61,8 @@ const App = {
         const container = document.getElementById('model-checkboxes');
         container.innerHTML = '';
 
-        // Select only AdaptiveEnsemble by default
-        this.selectedModels = models.includes('AdaptiveEnsemble') ? ['AdaptiveEnsemble'] : models.slice(0, 1);
+        // Select only MIGHTE-Nsemble by default
+        this.selectedModels = models.includes('MIGHTE-Nsemble') ? ['MIGHTE-Nsemble'] : models.slice(0, 1);
 
         for (const model of models) {
             const label = document.createElement('label');

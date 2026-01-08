@@ -129,85 +129,68 @@ class ProspectiveForecastGenerator:
     def load_hyperparameters(self, hyperparams_file: str) -> None:
         """Load trained model hyperparameters."""
         
-        print(f"Loading hyperparameters from {hyperparams_file}")
-        
         with open(hyperparams_file, 'rb') as f:
             self.hyperparams = pickle.load(f)
-            
+
         locations = list(self.hyperparams.keys())
-        print(f"Loaded hyperparameters for {len(locations)} locations: {', '.join(locations)}")
+        print(f"Loaded hyperparameters for {len(locations)} locations")
         
     def verify_hyperparameters(self) -> None:
         """Verify that all required hyperparameters are present."""
-        
-        print("Verifying hyperparameters...")
-        
+
         for location in self.hyperparams.keys():
             params = self.hyperparams[location]
-            
+
             # Check for required keys
             if 'stage1' not in params or 'stage2' not in params:
                 raise ValueError(f"Missing stage parameters for {location}")
-            
+
             stage1_params = params['stage1']
             stage2_params = params['stage2']
-            
+
             # Check Stage 1 parameters
             required_stage1 = ['best_params', 'num_boost_round', 'selected_states', 'lags']
             for key in required_stage1:
                 if key not in stage1_params:
                     raise ValueError(f"Missing Stage 1 parameter '{key}' for {location}")
-            
+
             # Check Stage 2 parameters
             required_stage2 = ['best_params', 'num_boost_round']
             for key in required_stage2:
                 if key not in stage2_params:
                     raise ValueError(f"Missing Stage 2 parameter '{key}' for {location}")
-            
+
             # Extract log transform setting
             self.use_log_transform[location] = params.get('use_log_transform', False)
-            if self.use_log_transform[location]:
-                print(f"  {location}: Using log transformation")
-            else:
-                print(f"  Verified parameters for {location}")
 
         # Detect bounded sigma mode from hyperparameters
         first_location = list(self.hyperparams.keys())[0]
         self.is_bounded = self.hyperparams[first_location].get('bounded_sigma', False)
         self.is_bounded_wide = self.hyperparams[first_location].get('bounded_sigma_wide', False)
         if self.is_bounded_wide:
-            print(f"Model type: BOUNDED SIGMA WIDE (log-space quantiles, sigma in [0.1, 0.8])")
+            print(f"Model type: BOUNDED WIDE (sigma in [0.1, 0.8])")
         elif self.is_bounded:
-            print(f"Model type: BOUNDED SIGMA (log-space quantiles, sigma in [0.15, 0.45])")
+            print(f"Model type: BOUNDED (sigma in [0.15, 0.45])")
         else:
-            print(f"Model type: STANDARD (linear-space quantiles)")
-
-        print(f"All hyperparameters verified successfully")
+            print(f"Model type: UNBOUNDED")
         
     def load_data(self, data_file: str) -> None:
         """Load and prepare data for forecasting."""
-        
-        print(f"Loading data from {data_file}")
-        
+
         # Load all data
         self.data = self.processor.load_and_pivot_data(data_file, exclude_locations=None)
-        
+
         # Get the last date in the data
         self.last_date = self.data['date'].max()
-        
-        print(f"Data loaded: {len(self.data)} total samples")
-        print(f"Last date in data: {self.last_date.strftime('%Y-%m-%d')}")
-        print(f"Forecasting {self.horizon} week(s) ahead from this date")
+
+        print(f"Data through: {self.last_date.strftime('%Y-%m-%d')} ({len(self.data)} weeks)")
         
     def generate_forecasts(self) -> Dict:
         """Generate prospective forecasts from the end of available data."""
-        
-        print(f"\nGenerating prospective forecasts...")
-        
+
         all_forecasts = {}
-        
+
         for location in self.hyperparams.keys():
-            print(f"  Generating forecast for {location}")
             
             # Get model parameters
             params = self.hyperparams[location]
@@ -219,8 +202,6 @@ class ProspectiveForecastGenerator:
             # Guard: Ensure we have lags and no lag_0 (data leakage)
             # Handle case where enhanced features were used (lags = None)
             if lags is None:
-                # Enhanced features mode - no explicit lags needed
-                print(f"    Using enhanced features mode (no explicit lags)")
                 use_enhanced = True
             else:
                 use_enhanced = False
@@ -249,10 +230,7 @@ class ProspectiveForecastGenerator:
                     )
                 
                 if len(X_train) < 50:
-                    print(f"    Warning: Insufficient training data for {location}")
                     continue
-                
-                print(f"    Training on {len(X_train)} samples")
                 
                 # Apply log transformation if enabled
                 if self.use_log_transform.get(location, False):
@@ -317,7 +295,6 @@ class ProspectiveForecastGenerator:
                     )
                 
                 if len(X_pred) == 0:
-                    print(f"    Warning: Cannot create prediction features for {location}")
                     continue
                 
                 # Apply log transformation to prediction features if enabled
@@ -379,10 +356,7 @@ class ProspectiveForecastGenerator:
                 
                 # Calculate target date
                 target_date = self.last_date + pd.Timedelta(weeks=self.horizon)
-                
-                # Validation logging for anchor/target alignment
-                print(f"    [VALIDATION] Anchor={self.last_date.strftime('%Y-%m-%d')}, Target={target_date.strftime('%Y-%m-%d')} (h={self.horizon})")
-                
+
                 all_forecasts[location] = {
                     'forecast_date': self.last_date,
                     'target_date': target_date,
@@ -390,13 +364,11 @@ class ProspectiveForecastGenerator:
                     'sigma': sigma_pred,
                     'quantile_forecasts': np.array(quantile_forecasts)
                 }
-                
-                print(f"    Forecast generated: μ={mu_pred:.2f}, σ={sigma_pred:.2f}")
                     
             except Exception as e:
-                print(f"    Error generating forecast for {location}: {str(e)}")
+                print(f"Error ({location}): {str(e)}")
                 continue
-                
+
         return all_forecasts
 
     def save_trained_models(self, forecasts: Dict, hyperparams: Dict, final_stage1_models: Dict, final_stage2_models: Dict,
@@ -476,23 +448,20 @@ class ProspectiveForecastGenerator:
         """Save forecasts in CDC FluSight format."""
         
         os.makedirs(output_dir, exist_ok=True)
-        
-        print(f"\nSaving forecasts to {output_dir}/")
-        
+
         # Format forecasts
         forecast_df = self.format_cdc_flusight(forecasts, model_name)
-        
+
         # Ensure column order matches CDC format
-        cdc_column_order = ['reference_date', 'horizon', 'target', 'target_end_date', 
+        cdc_column_order = ['reference_date', 'horizon', 'target', 'target_end_date',
                            'location', 'output_type', 'output_type_id', 'value']
         forecast_df = forecast_df[cdc_column_order]
-        
+
         # Generate filename with timestamp
         timestamp = self.last_date.strftime('%Y%m%d')
         forecast_file = os.path.join(output_dir, f"{model_name}_h{self.horizon}_prospective_{timestamp}.csv")
         forecast_df.to_csv(forecast_file, index=False)
-        print(f"  Forecasts saved to: {forecast_file}")
-        
+
         # Save summary
         summary_data = []
         for location, forecast in forecasts.items():
@@ -508,11 +477,10 @@ class ProspectiveForecastGenerator:
                 'lower_95': forecast['quantile_forecasts'][1],  # 0.025 quantile
                 'upper_95': forecast['quantile_forecasts'][21]  # 0.975 quantile
             })
-        
+
         summary_df = pd.DataFrame(summary_data)
         summary_file = os.path.join(output_dir, f"prospective_summary_h{self.horizon}_{timestamp}.csv")
         summary_df.to_csv(summary_file, index=False)
-        print(f"  Summary saved to: {summary_file}")
 
         return forecast_file
 
@@ -552,14 +520,7 @@ def main():
     if args.horizon < 1:
         raise ValueError("Horizon must be at least 1 week")
     
-    print(f"{'='*80}")
-    print(f"GENERATING PROSPECTIVE TWO-STAGE FORECASTS")
-    print(f"{'='*80}")
-    print(f"Hyperparameters: {args.hyperparams}")
-    print(f"Data file: {args.data_file}")
-    print(f"Horizon: {args.horizon} week(s)")
-    print(f"Output: {args.output}")
-    print(f"Model name: {args.model_name}")
+    print(f"\n=== {args.model_name} h{args.horizon} ===")
     
     # Initialize generator
     generator = ProspectiveForecastGenerator(horizon=args.horizon)
@@ -593,7 +554,7 @@ def main():
         # --- LOAD OTHER MODEL MEDIANS FOR BLENDING (unbounded only) ---
         other_model_medians = {}  # Dict of location -> median value
 
-        if not generator.is_bounded:
+        if not (generator.is_bounded or generator.is_bounded_wide):
             # Load the most recent prospective forecasts from t10 and t100 for blending
             # These should have been generated in the same pipeline run before this model
             target_date = generator.last_date + pd.Timedelta(weeks=generator.horizon)
@@ -620,20 +581,14 @@ def main():
                             if loc_name not in other_model_medians:
                                 other_model_medians[loc_name] = {}
                             other_model_medians[loc_name][model_key] = row['value']
-
-                        print(f"    Loaded {len(median_df)} medians from {model_variant} for blending")
                     except Exception as e:
-                        print(f"    Warning: Could not load {prosp_file} for blending: {e}")
+                        print(f"Warning: Could not load {prosp_file} for blending: {e}")
 
         # --- MAIN FORECAST LOOP ---
-        print(f"\nGenerating prospective forecasts...")
-        if generator.is_bounded:
-            print("  Mode: BOUNDED (log-space sigma, no blending)")
-        else:
-            print("  Mode: UNBOUNDED (blended median + conformal residuals)")
+        locations = list(generator.hyperparams.keys())
+        print(f"Generating forecasts for {len(locations)} locations...")
 
-        for location in generator.hyperparams.keys():
-            print(f"  Generating forecast for {location}")
+        for idx, location in enumerate(locations):
             try:
                 params = generator.hyperparams[location]
                 stage1_params = params['stage1']
@@ -731,7 +686,6 @@ def main():
                         'blended_mu': None,
                         'last_value': None
                     }
-                    print(f"    Bounded: μ={mu_pred_linear:.2f}, σ_log={sigma_log:.4f}")
 
                 else:
                     # UNBOUNDED MODE: Blended median + conformal residual quantiles
@@ -846,7 +800,6 @@ def main():
                         residual_quantiles = weighted_percentile(res_vals, res_wts, CDC_QUANTILES)
                         q_log = mu_log + residual_quantiles
                         qvals = np.array([max(0.0, np.expm1(val)) for val in q_log])
-                        print(f"    Blended: μ_blend={blended_mu:.2f}, using {len(res_vals)} conformal residuals")
                     else:
                         # Fallback to parametric Gaussian with Stage-2 sigma
                         dist_params = final_stage2.predict(X_pred_transformed[-1:], pred_type="parameters")
@@ -858,7 +811,6 @@ def main():
                             sigma_pred = sigma_pred * blended_mu
 
                         qvals = np.array([max(0.0, norm.ppf(q, loc=blended_mu, scale=sigma_pred)) for q in CDC_QUANTILES])
-                        print(f"    Blended: μ_blend={blended_mu:.2f}, fallback to parametric (only {len(residuals_log)} residuals)")
 
                     all_forecasts_local[location] = {
                         'forecast_date': generator.last_date,
@@ -872,16 +824,16 @@ def main():
                     }
 
             except Exception as e:
-                print(f"    Error: {e}")
+                print(f"Error ({location}): {e}")
                 continue
         return all_forecasts_local
 
     forecasts = _wrapped_generate()
     
     if len(forecasts) == 0:
-        print("\nError: No forecasts were generated. Check your data and models.")
+        print("Error: No forecasts were generated.")
         return
-    
+
     # Save results
     forecast_file = generator.save_forecasts(forecasts, args.output, args.model_name)
 
@@ -889,18 +841,8 @@ def main():
     if args.save_models and len(forecasts) > 0:
         generator.save_trained_models(forecasts, generator.hyperparams, generator._final_stage1_models, generator._final_stage2_models,
                                       args.models_output_dir, generator.horizon)
-    
-    print(f"\n{'='*80}")
-    print(f"PROSPECTIVE FORECASTING COMPLETE")
-    print(f"{'='*80}")
-    print(f"Generated forecasts for {len(forecasts)} locations")
-    print(f"Forecast file: {forecast_file}")
-    print(f"\nFiles are ready for submission or further analysis.")
-    
-    # Show sample output
-    print(f"\nSample of forecast format:")
-    forecast_df = pd.read_csv(forecast_file)
-    print(forecast_df.head(10))
+
+    print(f"Saved: {forecast_file}")
 
 
 if __name__ == "__main__":

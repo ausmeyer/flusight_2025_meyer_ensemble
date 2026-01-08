@@ -32,13 +32,12 @@ const DataLoader = {
         'LGBM-bounded': 'TwoStage-FrozenMu-bounded_h{H}_prospective_{DATE}.csv',
         'LGBM-bounded-wide-1': 'TwoStage-FrozenMu-bounded-wide-1_h{H}_prospective_{DATE}.csv',
         'LGBM-bounded-wide-2': 'TwoStage-FrozenMu-bounded-wide-2_h{H}_prospective_{DATE}.csv',
-        'LGBM-bounded-wide-3': 'TwoStage-FrozenMu-bounded-wide-3_h{H}_prospective_{DATE}.csv',
-        'AdaptiveEnsemble': 'AdaptiveEnsemble_prospective_{DATE}.csv'
+        'LGBM-bounded-wide-3': 'TwoStage-FrozenMu-bounded-wide-3_h{H}_prospective_{DATE}.csv'
     },
 
     // List of local models (for ordering - these appear first in the list)
     localModels: [
-        'AdaptiveEnsemble', 'ARIMA', 'LGBM-blended', 'LGBM-bounded',
+        'ARIMA', 'LGBM-blended', 'LGBM-bounded',
         'LGBM-bounded-wide-1', 'LGBM-bounded-wide-2', 'LGBM-bounded-wide-3', 'SVM'
     ],
 
@@ -77,25 +76,25 @@ const DataLoader = {
 
     // Base colors for local models
     modelColors: {
-        'AdaptiveEnsemble': '#cc5200',
         'ARIMA': '#1f77b4',
         'SVM': '#2ca02c',
         'LGBM-blended': '#9467bd',
         'LGBM-bounded': '#e377c2',
         'LGBM-bounded-wide-1': '#8c564b',
         'LGBM-bounded-wide-2': '#17becf',
-        'LGBM-bounded-wide-3': '#bcbd22'
+        'LGBM-bounded-wide-3': '#bcbd22',
+        'MIGHTE-Nsemble': '#cc5200'
     },
 
     modelFills: {
-        'AdaptiveEnsemble': 'rgba(204, 82, 0, 0.2)',
         'ARIMA': 'rgba(31, 119, 180, 0.2)',
         'SVM': 'rgba(44, 160, 44, 0.2)',
         'LGBM-blended': 'rgba(148, 103, 189, 0.2)',
         'LGBM-bounded': 'rgba(227, 119, 194, 0.2)',
         'LGBM-bounded-wide-1': 'rgba(140, 86, 75, 0.2)',
         'LGBM-bounded-wide-2': 'rgba(23, 190, 207, 0.2)',
-        'LGBM-bounded-wide-3': 'rgba(188, 189, 34, 0.2)'
+        'LGBM-bounded-wide-3': 'rgba(188, 189, 34, 0.2)',
+        'MIGHTE-Nsemble': 'rgba(204, 82, 0, 0.2)'
     },
 
     // Generate a color based on model name (deterministic hash)
@@ -196,21 +195,7 @@ const DataLoader = {
         // Remove duplicates and sort descending
         const uniqueDates = [...new Set(dates)].sort().reverse();
 
-        // Try to find a date with actual data
-        for (const dateStr of uniqueDates) {
-            const testUrl = `${this.getBaseUrl()}/forecasts/prospective/AdaptiveEnsemble_prospective_${dateStr}.csv`;
-            try {
-                const response = await fetch(testUrl, { method: 'HEAD' });
-                if (response.ok) {
-                    this.latestDate = dateStr;
-                    return dateStr;
-                }
-            } catch (e) {
-                // Continue to next date
-            }
-        }
-
-        // Fallback: try ARIMA files
+        // Try to find a date with actual data (use ARIMA as it's a local model)
         for (const dateStr of uniqueDates) {
             const testUrl = `${this.getBaseUrl()}/forecasts/prospective/ARIMA_h1_prospective_${dateStr}.csv`;
             try {
@@ -410,35 +395,20 @@ const DataLoader = {
 
         const loadPromises = [];
 
-        // Load local models
+        // Load local models (all have separate files per horizon)
         for (const model of models) {
-            if (model === 'AdaptiveEnsemble') {
-                // Ensemble file contains all horizons
+            for (const h of horizons) {
                 loadPromises.push(
-                    this.loadForecastWithFallback(model, null).then(result => {
+                    this.loadForecastWithFallback(model, h).then(result => {
                         if (result) {
-                            this.forecasts[model] = result.data;
+                            const key = `${model}_h${h}`;
+                            this.forecasts[key] = result.data;
                             if (!latestDateFound || result.date > latestDateFound) {
                                 latestDateFound = result.date;
                             }
                         }
                     })
                 );
-            } else {
-                // Other models have separate files per horizon
-                for (const h of horizons) {
-                    loadPromises.push(
-                        this.loadForecastWithFallback(model, h).then(result => {
-                            if (result) {
-                                const key = `${model}_h${h}`;
-                                this.forecasts[key] = result.data;
-                                if (!latestDateFound || result.date > latestDateFound) {
-                                    latestDateFound = result.date;
-                                }
-                            }
-                        })
-                    );
-                }
             }
         }
 
