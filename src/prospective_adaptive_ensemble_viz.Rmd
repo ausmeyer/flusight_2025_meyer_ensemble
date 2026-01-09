@@ -140,18 +140,19 @@ for (h in 1:4) {
 github_base_url <- 'https://raw.githubusercontent.com/cdcepi/FluSight-forecast-hub/main/model-output/MIGHTE-Nsemble'
 
 # 2024-25 season CDC dates available on GitHub
-github_ensemble_dates <- c('2025-11-22', '2025-11-29', '2025-12-06', '2025-12-13', '2025-12-20', '2025-12-27')
+github_ensemble_dates <- c('2025-11-22', '2025-11-29', '2025-12-06', '2025-12-13', '2025-12-20', '2025-12-27', '2026-01-03', '2026-01-10')
 
-# Find the latest local ensemble file (uses CDC date convention)
+# Find all local ensemble files (uses CDC date convention)
 local_ens_files <- list.files(prosp_dir, pattern = '^AdaptiveEnsemble_prospective_\\d{8}\\.csv$', full.names = TRUE)
-latest_local_cdc_date <- if (length(local_ens_files) > 0) {
-  dates <- sapply(local_ens_files, function(f) {
+local_hedge_files <- list.files(prosp_dir, pattern = '^AdaptiveEnsemble-hedge_prospective_\\d{8}\\.csv$', full.names = TRUE)
+local_meta_files <- list.files(prosp_dir, pattern = '^AdaptiveEnsemble-meta_prospective_\\d{8}\\.csv$', full.names = TRUE)
+local_ens_dates <- if (length(local_ens_files) > 0) {
+  sapply(local_ens_files, function(f) {
     m <- regexpr("\\d{8}", basename(f))
     regmatches(basename(f), m)
   })
-  max(dates)
 } else {
-  ""
+  character(0)
 }
 
 # Load historical ensemble from GitHub
@@ -161,8 +162,8 @@ for (cdc_date in github_ensemble_dates) {
   # Convert to YYYYMMDD format for forecast_date
   cdc_date_str <- gsub('-', '', cdc_date)
 
-  # Skip if this is the latest local date (we'll use local file for that)
-  if (cdc_date_str == latest_local_cdc_date) next
+  # Skip if we have a local file for this date (prefer local files)
+  if (cdc_date_str %in% local_ens_dates) next
 
   url <- sprintf('%s/%s-MIGHTE-Nsemble.csv', github_base_url, cdc_date)
 
@@ -186,33 +187,96 @@ for (cdc_date in github_ensemble_dates) {
   })
 }
 
-# Load the latest local ensemble file only
-if (latest_local_cdc_date != "" && length(local_ens_files) > 0) {
-  latest_file_path <- local_ens_files[sapply(local_ens_files, function(f) grepl(latest_local_cdc_date, f))]
-  if (length(latest_file_path) > 0) {
-    tryCatch({
-      df <- read_csv(latest_file_path[1], show_col_types = FALSE) %>%
-        filter(output_type == 'quantile') %>%
-        mutate(
-          model = 'AdaptiveEnsemble',
-          forecast_date = latest_local_cdc_date,  # Use CDC date (YYYYMMDD)
-          reference_date = as.Date(reference_date),
-          target_end_date = as.Date(target_end_date),
-          location = as.character(location),
-          output_type_id = as.numeric(output_type_id),
-          value = as.numeric(value),
-          horizon = as.integer(horizon) + 1L
-        ) %>%
-        select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
-      ens_list[['local_latest']] <- df
-    }, error = function(e) {
-      message(sprintf("Could not load local ensemble: %s", e$message))
-    })
-  }
+# Load all local ensemble files
+for (local_file in local_ens_files) {
+  # Extract date from filename
+  m <- regexpr("\\d{8}", basename(local_file))
+  local_cdc_date <- regmatches(basename(local_file), m)
+
+  tryCatch({
+    df <- read_csv(local_file, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble',
+        forecast_date = local_cdc_date,  # Use CDC date (YYYYMMDD)
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    ens_list[[paste0('local_', local_cdc_date)]] <- df
+  }, error = function(e) {
+    message(sprintf("Could not load local ensemble %s: %s", basename(local_file), e$message))
+  })
 }
 
 if (length(ens_list) > 0) {
   all_forecasts[['Ensemble']] <- bind_rows(ens_list)
+}
+
+# Load all local hedge ensemble files
+hedge_list <- list()
+for (local_file in local_hedge_files) {
+  # Extract date from filename
+  m <- regexpr("\\d{8}", basename(local_file))
+  local_cdc_date <- regmatches(basename(local_file), m)
+
+  tryCatch({
+    df <- read_csv(local_file, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble-hedge',
+        forecast_date = local_cdc_date,  # Use CDC date (YYYYMMDD)
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    hedge_list[[paste0('local_', local_cdc_date)]] <- df
+  }, error = function(e) {
+    message(sprintf("Could not load local hedge ensemble %s: %s", basename(local_file), e$message))
+  })
+}
+
+if (length(hedge_list) > 0) {
+  all_forecasts[['AdaptiveEnsemble-hedge']] <- bind_rows(hedge_list)
+}
+
+# Load all local meta ensemble files
+meta_list <- list()
+for (local_file in local_meta_files) {
+  # Extract date from filename
+  m <- regexpr("\\d{8}", basename(local_file))
+  local_cdc_date <- regmatches(basename(local_file), m)
+
+  tryCatch({
+    df <- read_csv(local_file, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble-meta',
+        forecast_date = local_cdc_date,  # Use CDC date (YYYYMMDD)
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    meta_list[[paste0('local_', local_cdc_date)]] <- df
+  }, error = function(e) {
+    message(sprintf("Could not load local meta ensemble %s: %s", basename(local_file), e$message))
+  })
+}
+
+if (length(meta_list) > 0) {
+  all_forecasts[['AdaptiveEnsemble-meta']] <- bind_rows(meta_list)
 }
 
 # Combine all forecasts
@@ -256,6 +320,8 @@ all_models <- sort(unique(forecast_summary$model))
 # Model colors
 model_colors <- c(
   "AdaptiveEnsemble" = "#cc5200",
+  "AdaptiveEnsemble-hedge" = "#006d77",
+  "AdaptiveEnsemble-meta" = "#9b2226",
   "ARIMA" = "#1f77b4",
   "SVM" = "#2ca02c",
   "LGBM-blended" = "#9467bd",
@@ -270,6 +336,8 @@ model_colors <- c(
 # Fill colors (lighter versions for ribbons)
 model_fills <- c(
   "AdaptiveEnsemble" = "#ff944d",
+  "AdaptiveEnsemble-hedge" = "#83c5be",
+  "AdaptiveEnsemble-meta" = "#e09f9a",
   "ARIMA" = "#7fbfff",
   "SVM" = "#90ee90",
   "LGBM-blended" = "#c9b3d9",

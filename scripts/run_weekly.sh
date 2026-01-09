@@ -229,5 +229,7 @@ if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3" ]]; then AE_ARGS+=(--include-lg
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-4 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-5 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5"); fi
 Rscript src/generate_prosp_adaptive_ensemble.R "${AE_ARGS[@]}"
+Rscript src/generate_prosp_adaptive_ensemble_hedge.R "${AE_ARGS[@]}"
+Rscript src/generate_prosp_adaptive_ensemble_meta.R "${AE_ARGS[@]}"
 
 echo "==> Done. Outputs under forecasts/{retrospective,prospective}"

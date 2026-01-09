@@ -174,29 +174,29 @@ echo "Using data file: $STITCHED"
 # BOUNDED SIGMA NARROW (sigma range [0.15, 0.45]) - RETRAIN TO FIX BUG
 # =============================================================================
 
-echo ""
-echo "============================================================================="
-echo "Training BOUNDED SIGMA NARROW Models (log-space with sigma in [0.15, 0.45])"
-echo "============================================================================="
-
-for H in 1 2 3 4; do
-  echo ""
-  echo ">>> Training bounded sigma narrow model for horizon $H"
-  python src/train_two_stage.py \
-    --data-file "$STITCHED" \
-    --cut-off 2024-07-01 \
-    --locations Alabama Alaska Arizona Arkansas California Colorado Connecticut Delaware "District of Columbia" Florida Georgia Hawaii Idaho Illinois Indiana Iowa Kansas Kentucky Louisiana Maine Maryland Massachusetts Michigan Minnesota Mississippi Missouri Montana Nebraska Nevada "New Hampshire" "New Jersey" "New Mexico" "New York" "North Carolina" "North Dakota" Ohio Oklahoma Oregon Pennsylvania "Puerto Rico" "Rhode Island" "South Carolina" "South Dakota" Tennessee Texas US Utah Vermont Virginia Washington "West Virginia" Wisconsin Wyoming \
-    --horizon $H \
-    --use-enhanced-features \
-    --bounded-sigma \
-    --models-output-dir models/lgbm_enhanced_t10_bounded \
-    --trials-stage1 10 \
-    --trials-stage2 10 \
-    --n-features 10 \
-    --num-threads ${LGBM_NUM_THREADS:-16} \
-    --optuna-jobs ${OPTUNA_JOBS:-1} \
-    "$@"
-done
+# echo ""
+# echo "============================================================================="
+# echo "Training BOUNDED SIGMA NARROW Models (log-space with sigma in [0.15, 0.45])"
+# echo "============================================================================="
+#
+# for H in 1 2 3 4; do
+#   echo ""
+#   echo ">>> Training bounded sigma narrow model for horizon $H"
+#   python src/train_two_stage.py \
+#     --data-file "$STITCHED" \
+#     --cut-off 2024-07-01 \
+#     --locations Alabama Alaska Arizona Arkansas California Colorado Connecticut Delaware "District of Columbia" Florida Georgia Hawaii Idaho Illinois Indiana Iowa Kansas Kentucky Louisiana Maine Maryland Massachusetts Michigan Minnesota Mississippi Missouri Montana Nebraska Nevada "New Hampshire" "New Jersey" "New Mexico" "New York" "North Carolina" "North Dakota" Ohio Oklahoma Oregon Pennsylvania "Puerto Rico" "Rhode Island" "South Carolina" "South Dakota" Tennessee Texas US Utah Vermont Virginia Washington "West Virginia" Wisconsin Wyoming \
+#     --horizon $H \
+#     --use-enhanced-features \
+#     --bounded-sigma \
+#     --models-output-dir models/lgbm_enhanced_t10_bounded \
+#     --trials-stage1 10 \
+#     --trials-stage2 10 \
+#     --n-features 10 \
+#     --num-threads ${LGBM_NUM_THREADS:-16} \
+#     --optuna-jobs ${OPTUNA_JOBS:-1} \
+#     "$@"
+# done
 
 # =============================================================================
 # BOUNDED SIGMA WIDE VARIANT 3 (wider sigma range [0.1, 0.8]) - COMMENTED OUT
@@ -225,6 +225,34 @@ done
 #     --optuna-jobs ${OPTUNA_JOBS:-1} \
 #     "$@"
 # done
+
+# =============================================================================
+# BOUNDED SIGMA WIDE VARIANT 4 (wider sigma range [0.1, 0.8]) - NO ENHANCED FEATURES
+# Uses default features (state lags) instead of enhanced features
+# =============================================================================
+
+echo ""
+echo "============================================================================="
+echo "Training BOUNDED SIGMA WIDE-4 Models (log-space with sigma in [0.1, 0.8], default features)"
+echo "============================================================================="
+
+for H in 1 2 3 4; do
+  echo ""
+  echo ">>> Training bounded sigma wide-4 model for horizon $H"
+  python src/train_two_stage.py \
+    --data-file "$STITCHED" \
+    --cut-off 2024-07-01 \
+    --locations Alabama Alaska Arizona Arkansas California Colorado Connecticut Delaware "District of Columbia" Florida Georgia Hawaii Idaho Illinois Indiana Iowa Kansas Kentucky Louisiana Maine Maryland Massachusetts Michigan Minnesota Mississippi Missouri Montana Nebraska Nevada "New Hampshire" "New Jersey" "New Mexico" "New York" "North Carolina" "North Dakota" Ohio Oklahoma Oregon Pennsylvania "Puerto Rico" "Rhode Island" "South Carolina" "South Dakota" Tennessee Texas US Utah Vermont Virginia Washington "West Virginia" Wisconsin Wyoming \
+    --horizon $H \
+    --bounded-sigma-wide \
+    --models-output-dir models/lgbm_t10_bounded_wide_4 \
+    --trials-stage1 10 \
+    --trials-stage2 10 \
+    --n-features 10 \
+    --num-threads ${LGBM_NUM_THREADS:-16} \
+    --optuna-jobs ${OPTUNA_JOBS:-1} \
+    "$@"
+done
 
 echo ""
 echo "============================================================================="
