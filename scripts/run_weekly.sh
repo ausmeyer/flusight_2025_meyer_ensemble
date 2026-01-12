@@ -19,6 +19,7 @@ cd "$ROOT_DIR"
 # --include-lgbm-blended <t/f>  Include LGBM blended in ensemble (default true)
 # --include-lgbm-bounded <t/f>  Include LGBM bounded in ensemble (default true)
 # --include-lgbm-bounded-wide-N <t/f>  Include LGBM bounded wide variant N in ensemble (N=1-5)
+# --include-lgbm-bounded-wide-4-ne <t/f>  Include LGBM bounded wide 4 non-enhanced in ensemble
 
 ENSEMBLE_LOOKBACK_WEEKS=""
 ENSEMBLE_HISTORY_WEEKS=""
@@ -30,6 +31,7 @@ ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1=""
 ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2=""
 ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3=""
 ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4_NE=""
 ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5=""
 
 while [[ $# -gt 0 ]]; do
@@ -54,6 +56,8 @@ while [[ $# -gt 0 ]]; do
       ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3="$2"; shift 2;;
     --include-lgbm-bounded-wide-4)
       ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4="$2"; shift 2;;
+    --include-lgbm-bounded-wide-4-ne)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4_NE="$2"; shift 2;;
     --include-lgbm-bounded-wide-5)
       ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5="$2"; shift 2;;
     *)
@@ -118,6 +122,7 @@ mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_2
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_3
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_4
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_5
+mkdir -p forecasts/retrospective/lgbm_t10_bounded_wide_4
 mkdir -p forecasts/retrospective/svm_t100
 mkdir -p forecasts/prospective
 
@@ -149,6 +154,14 @@ for V in 1 2 3 4 5; do
       --output-base forecasts/retrospective
   fi
 done
+
+# Run retrospective for non-enhanced bounded-wide-4 model (uses default state lag features)
+if [[ -d "models/lgbm_t10_bounded_wide_4" ]]; then
+  echo "==> Retrospective LGBM Bounded Wide 4 Non-Enhanced (using recent cutoff)"
+  python src/generate_all_retro_lgbm.py --data-file "$STITCHED" --cut-off "$CUTOFF_RECENT" \
+    --models-dir "models/lgbm_t10_bounded_wide_4" --models-base-dir "models/lgbm_t10_bounded_wide_4" \
+    --output-base forecasts/retrospective
+fi
 
 echo "==> Retrospective SVM (h=1..4)"
 for H in 1 2 3 4; do
@@ -207,6 +220,21 @@ for V in 1 2 3 4 5; do
   fi
 done
 
+# Run prospective for non-enhanced bounded-wide-4 model (uses default state lag features)
+if [[ -d "models/lgbm_t10_bounded_wide_4" ]]; then
+  echo "==> Prospective LGBM Bounded Wide 4 Non-Enhanced (h=1..4)"
+  for H in 1 2 3 4; do
+    python src/generate_prosp_lgbm.py \
+      --hyperparams "models/lgbm_t10_bounded_wide_4/two_stage_hyperparameters_h${H}.pkl" \
+      --data-file "$STITCHED" \
+      --horizon ${H} \
+      --output forecasts/prospective \
+      --model-name "TwoStage-FrozenMu-bounded-wide-4-ne" \
+      --save-models \
+      --models-output-dir "models/lgbm_t10_bounded_wide_4" || true
+  done
+fi
+
 echo "==> Prospective Adaptive Ensemble"
 # Align ensemble as-of date with the reference date used by prospective generators
 PROSP_ASOF=$(python - <<PY
@@ -227,6 +255,7 @@ if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1" ]]; then AE_ARGS+=(--include-lg
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-2 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-3 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-4 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4_NE" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-4-ne "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4_NE"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-5 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5"); fi
 Rscript src/generate_prosp_adaptive_ensemble.R "${AE_ARGS[@]}"
 Rscript src/generate_prosp_adaptive_ensemble_hedge.R "${AE_ARGS[@]}"

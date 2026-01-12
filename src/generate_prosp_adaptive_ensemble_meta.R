@@ -19,6 +19,7 @@ INCLUDE_LGBM_BOUNDED_WIDE_1 <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_2 <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_3 <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_4 <- TRUE
+INCLUDE_LGBM_BOUNDED_WIDE_4_NE <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_5 <- TRUE
 AS_OF_OVERRIDE <- NA_character_
 
@@ -41,6 +42,7 @@ while (i <= length(args)) {
   if (key == '--include-lgbm-bounded-wide-2') { INCLUDE_LGBM_BOUNDED_WIDE_2 <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--include-lgbm-bounded-wide-3') { INCLUDE_LGBM_BOUNDED_WIDE_3 <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--include-lgbm-bounded-wide-4') { INCLUDE_LGBM_BOUNDED_WIDE_4 <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
+  if (key == '--include-lgbm-bounded-wide-4-ne') { INCLUDE_LGBM_BOUNDED_WIDE_4_NE <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--include-lgbm-bounded-wide-5') { INCLUDE_LGBM_BOUNDED_WIDE_5 <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--asof-date')      { AS_OF_OVERRIDE <- val; i <- i + 2; next }
   i <- i + 1
@@ -297,6 +299,11 @@ load_retro_for_h <- function(h) {
       lst[[sprintf('LGBM_bounded_wide_%d', v)]] <- read_csv(lgbm_bounded_wide_path, show_col_types = FALSE)
     }
   }
+  # Bounded wide 4 non-enhanced (uses default state lag features, not enhanced features)
+  lgbm_bounded_wide_4_ne_path <- file.path('forecasts/retrospective', 'lgbm_t10_bounded_wide_4', sprintf('TwoStage-FrozenMu_h%d_forecasts.csv', h))
+  if (INCLUDE_LGBM_BOUNDED_WIDE_4_NE && file.exists(lgbm_bounded_wide_4_ne_path)) {
+    lst$LGBM_bounded_wide_4_ne <- read_csv(lgbm_bounded_wide_4_ne_path, show_col_types = FALSE)
+  }
   if (INCLUDE_SVM && length(svm_glob) > 0) {
     svm_df <- bind_rows(lapply(svm_glob, read_csv, show_col_types = FALSE))
     if ('type' %in% names(svm_df)) svm_df <- svm_df %>% rename(output_type = type)
@@ -330,6 +337,11 @@ load_prosp_for_h <- function(h, ts) {
     if (include_flag && file.exists(lgbm_bounded_wide_fp)) {
       lst[[sprintf('LGBM_bounded_wide_%d', v)]] <- read_csv(lgbm_bounded_wide_fp, show_col_types = FALSE)
     }
+  }
+  # LGBM Bounded Wide 4 Non-Enhanced (default state lag features)
+  lgbm_bounded_wide_4_ne_fp <- file.path(pdir, sprintf('TwoStage-FrozenMu-bounded-wide-4-ne_h%d_prospective_%s.csv', h, ts))
+  if (INCLUDE_LGBM_BOUNDED_WIDE_4_NE && file.exists(lgbm_bounded_wide_4_ne_fp)) {
+    lst$LGBM_bounded_wide_4_ne <- read_csv(lgbm_bounded_wide_4_ne_fp, show_col_types = FALSE)
   }
   lst
 }
