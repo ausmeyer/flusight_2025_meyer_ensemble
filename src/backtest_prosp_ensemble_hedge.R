@@ -23,6 +23,7 @@ INCLUDE_LGBM_BOUNDED_WIDE_1 <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_2 <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_3 <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_4 <- TRUE
+INCLUDE_LGBM_BOUNDED_WIDE_4_NE <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_5 <- TRUE
 
 i <- 1
@@ -42,6 +43,7 @@ while (i <= length(args)) {
   if (key == "--include-lgbm-bounded-wide-2") { INCLUDE_LGBM_BOUNDED_WIDE_2 <- tolower(val) %in% c("1","true","t","yes","y"); i <- i + 2; next }
   if (key == "--include-lgbm-bounded-wide-3") { INCLUDE_LGBM_BOUNDED_WIDE_3 <- tolower(val) %in% c("1","true","t","yes","y"); i <- i + 2; next }
   if (key == "--include-lgbm-bounded-wide-4") { INCLUDE_LGBM_BOUNDED_WIDE_4 <- tolower(val) %in% c("1","true","t","yes","y"); i <- i + 2; next }
+  if (key == "--include-lgbm-bounded-wide-4-ne") { INCLUDE_LGBM_BOUNDED_WIDE_4_NE <- tolower(val) %in% c("1","true","t","yes","y"); i <- i + 2; next }
   if (key == "--include-lgbm-bounded-wide-5") { INCLUDE_LGBM_BOUNDED_WIDE_5 <- tolower(val) %in% c("1","true","t","yes","y"); i <- i + 2; next }
   i <- i + 1
 }
@@ -234,6 +236,13 @@ for (h in 1:4) {
     model_dfs <- append(model_dfs, list(load_prospective_files(
       sprintf("^TwoStage-FrozenMu-bounded-wide-%d_h%d_prospective_\\d{8}\\.csv$", v, h),
       sprintf("LGBM_bounded_wide_%d", v)
+    )))
+  }
+  # LGBM bounded wide 4 non-enhanced (uses default state lag features)
+  if (INCLUDE_LGBM_BOUNDED_WIDE_4_NE) {
+    model_dfs <- append(model_dfs, list(load_prospective_files(
+      sprintf("^TwoStage-FrozenMu-bounded-wide-4-ne_h%d_prospective_\\d{8}\\.csv$", h),
+      "LGBM_bounded_wide_4_ne"
     )))
   }
 

@@ -25,6 +25,7 @@ INCLUDE_LGBM_BOUNDED_WIDE_1=""
 INCLUDE_LGBM_BOUNDED_WIDE_2=""
 INCLUDE_LGBM_BOUNDED_WIDE_3=""
 INCLUDE_LGBM_BOUNDED_WIDE_4=""
+INCLUDE_LGBM_BOUNDED_WIDE_4_NE=""
 INCLUDE_LGBM_BOUNDED_WIDE_5=""
 
 while [[ $# -gt 0 ]]; do
@@ -65,6 +66,8 @@ while [[ $# -gt 0 ]]; do
       INCLUDE_LGBM_BOUNDED_WIDE_3="$2"; shift 2;;
     --include-lgbm-bounded-wide-4)
       INCLUDE_LGBM_BOUNDED_WIDE_4="$2"; shift 2;;
+    --include-lgbm-bounded-wide-4-ne)
+      INCLUDE_LGBM_BOUNDED_WIDE_4_NE="$2"; shift 2;;
     --include-lgbm-bounded-wide-5)
       INCLUDE_LGBM_BOUNDED_WIDE_5="$2"; shift 2;;
     *)
@@ -83,6 +86,7 @@ if [[ -n "$INCLUDE_LGBM_BOUNDED_WIDE_1" ]]; then ARGS+=(--include-lgbm-bounded-w
 if [[ -n "$INCLUDE_LGBM_BOUNDED_WIDE_2" ]]; then ARGS+=(--include-lgbm-bounded-wide-2 "$INCLUDE_LGBM_BOUNDED_WIDE_2"); fi
 if [[ -n "$INCLUDE_LGBM_BOUNDED_WIDE_3" ]]; then ARGS+=(--include-lgbm-bounded-wide-3 "$INCLUDE_LGBM_BOUNDED_WIDE_3"); fi
 if [[ -n "$INCLUDE_LGBM_BOUNDED_WIDE_4" ]]; then ARGS+=(--include-lgbm-bounded-wide-4 "$INCLUDE_LGBM_BOUNDED_WIDE_4"); fi
+if [[ -n "$INCLUDE_LGBM_BOUNDED_WIDE_4_NE" ]]; then ARGS+=(--include-lgbm-bounded-wide-4-ne "$INCLUDE_LGBM_BOUNDED_WIDE_4_NE"); fi
 if [[ -n "$INCLUDE_LGBM_BOUNDED_WIDE_5" ]]; then ARGS+=(--include-lgbm-bounded-wide-5 "$INCLUDE_LGBM_BOUNDED_WIDE_5"); fi
 
 VARIANT_ARGS=("${ARGS[@]}")

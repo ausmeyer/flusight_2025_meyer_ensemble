@@ -15,6 +15,14 @@ ENSEMBLE_HISTORY_WEEKS=""
 ENSEMBLE_INCLUDE_ARIMA=""
 ENSEMBLE_INCLUDE_SVM=""
 ENSEMBLE_INCLUDE_LGBM=""
+ENSEMBLE_INCLUDE_LGBM_BLENDED=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4_NE=""
+ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,6 +36,22 @@ while [[ $# -gt 0 ]]; do
       ENSEMBLE_INCLUDE_SVM="$2"; shift 2;;
     --include-lgbm)
       ENSEMBLE_INCLUDE_LGBM="$2"; shift 2;;
+    --include-lgbm-blended)
+      ENSEMBLE_INCLUDE_LGBM_BLENDED="$2"; shift 2;;
+    --include-lgbm-bounded)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED="$2"; shift 2;;
+    --include-lgbm-bounded-wide-1)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1="$2"; shift 2;;
+    --include-lgbm-bounded-wide-2)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2="$2"; shift 2;;
+    --include-lgbm-bounded-wide-3)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3="$2"; shift 2;;
+    --include-lgbm-bounded-wide-4)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4="$2"; shift 2;;
+    --include-lgbm-bounded-wide-4-ne)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4_NE="$2"; shift 2;;
+    --include-lgbm-bounded-wide-5)
+      ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5="$2"; shift 2;;
     *)
       shift;;
   esac
@@ -50,6 +74,14 @@ if [[ -n "$ENSEMBLE_HISTORY_WEEKS" ]]; then AE_ARGS+=(--history-weeks "$ENSEMBLE
 if [[ -n "$ENSEMBLE_INCLUDE_ARIMA" ]]; then AE_ARGS+=(--include-arima "$ENSEMBLE_INCLUDE_ARIMA"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_SVM" ]]; then AE_ARGS+=(--include-svm "$ENSEMBLE_INCLUDE_SVM"); fi
 if [[ -n "$ENSEMBLE_INCLUDE_LGBM" ]]; then AE_ARGS+=(--include-lgbm "$ENSEMBLE_INCLUDE_LGBM"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BLENDED" ]]; then AE_ARGS+=(--include-lgbm-blended "$ENSEMBLE_INCLUDE_LGBM_BLENDED"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED" ]]; then AE_ARGS+=(--include-lgbm-bounded "$ENSEMBLE_INCLUDE_LGBM_BOUNDED"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-1 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-2 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_2"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-3 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_3"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-4 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4_NE" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-4-ne "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_4_NE"); fi
+if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-5 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5"); fi
 
 # Generate list of As-Of dates (Saturdays) from Cutoff to now
 DATES=$(python - <<PY
@@ -100,8 +132,37 @@ for h in h_list:
         'dst': f'forecasts/prospective/TwoStage-FrozenMu-t10_h{h}_prospective_{ts}.csv'
     })
     tasks.append({
+        'src': f'forecasts/retrospective/lgbm_enhanced_t10_blended/TwoStage-FrozenMu_h{h}_forecasts.csv',
+        'dst': f'forecasts/prospective/TwoStage-FrozenMu-blended_h{h}_prospective_{ts}.csv'
+    })
+    tasks.append({
         'src': f'forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h{h}_forecasts.csv',
         'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded_h{h}_prospective_{ts}.csv'
+    })
+    tasks.append({
+        'src': f'forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_1/TwoStage-FrozenMu_h{h}_forecasts.csv',
+        'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded-wide-1_h{h}_prospective_{ts}.csv'
+    })
+    tasks.append({
+        'src': f'forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_2/TwoStage-FrozenMu_h{h}_forecasts.csv',
+        'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded-wide-2_h{h}_prospective_{ts}.csv'
+    })
+    tasks.append({
+        'src': f'forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_3/TwoStage-FrozenMu_h{h}_forecasts.csv',
+        'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded-wide-3_h{h}_prospective_{ts}.csv'
+    })
+    tasks.append({
+        'src': f'forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_4/TwoStage-FrozenMu_h{h}_forecasts.csv',
+        'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded-wide-4_h{h}_prospective_{ts}.csv'
+    })
+    # Non-enhanced bounded-wide-4 model (uses default state lag features)
+    tasks.append({
+        'src': f'forecasts/retrospective/lgbm_t10_bounded_wide_4/TwoStage-FrozenMu_h{h}_forecasts.csv',
+        'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded-wide-4-ne_h{h}_prospective_{ts}.csv'
+    })
+    tasks.append({
+        'src': f'forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_5/TwoStage-FrozenMu_h{h}_forecasts.csv',
+        'dst': f'forecasts/prospective/TwoStage-FrozenMu-bounded-wide-5_h{h}_prospective_{ts}.csv'
     })
 
 files_created = 0

@@ -97,6 +97,16 @@ for (h in 1:4) {
   path <- file.path(root_prefix, sprintf('forecasts/retrospective/lgbm_enhanced_t10_bounded/TwoStage-FrozenMu_h%d_forecasts.csv', h))
   all_forecasts[[paste0('LGBM_bounded_h', h)]] <- load_forecast_quantiles(path, 'LGBM-bounded', h)
 
+  # LGBM Bounded Wide variants 1-5 (enhanced features)
+  for (v in 1:5) {
+    path <- file.path(root_prefix, sprintf('forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_%d/TwoStage-FrozenMu_h%d_forecasts.csv', v, h))
+    all_forecasts[[paste0('LGBM_bounded_wide_', v, '_h', h)]] <- load_forecast_quantiles(path, sprintf('LGBM-bounded-wide-%d', v), h)
+  }
+
+  # LGBM Bounded Wide 4 Non-Enhanced (default state lag features)
+  path <- file.path(root_prefix, sprintf('forecasts/retrospective/lgbm_t10_bounded_wide_4/TwoStage-FrozenMu_h%d_forecasts.csv', h))
+  all_forecasts[[paste0('LGBM_bounded_wide_4_ne_h', h)]] <- load_forecast_quantiles(path, 'LGBM-bounded-wide-4-ne', h)
+
   path <- file.path(root_prefix, sprintf('forecasts/retrospective/svm_t100/svm_retrospective_h%d.csv', h))
   all_forecasts[[paste0('SVM_h', h)]] <- load_forecast_quantiles(path, 'SVM', h)
 }
@@ -159,7 +169,13 @@ model_colors <- c(
   "ARIMA" = "#1f77b4",
   "SVM" = "#2ca02c",
   "LGBM-blended" = "#9467bd",
-  "LGBM-bounded" = "#e377c2"
+  "LGBM-bounded" = "#e377c2",
+  "LGBM-bounded-wide-1" = "#8c564b",
+  "LGBM-bounded-wide-2" = "#17becf",
+  "LGBM-bounded-wide-3" = "#bcbd22",
+  "LGBM-bounded-wide-4" = "#7f7f7f",
+  "LGBM-bounded-wide-4-ne" = "#ff7f0e",
+  "LGBM-bounded-wide-5" = "#d62728"
 )
 
 # Fill colors (lighter versions)
@@ -169,7 +185,13 @@ model_fills <- c(
   "ARIMA" = "#7fbfff",
   "SVM" = "#90ee90",
   "LGBM-blended" = "#c9b3d9",
-  "LGBM-bounded" = "#f0b8d0"
+  "LGBM-bounded" = "#f0b8d0",
+  "LGBM-bounded-wide-1" = "#c49a91",
+  "LGBM-bounded-wide-2" = "#9edae5",
+  "LGBM-bounded-wide-3" = "#dbdb8d",
+  "LGBM-bounded-wide-4" = "#c7c7c7",
+  "LGBM-bounded-wide-4-ne" = "#ffbb78",
+  "LGBM-bounded-wide-5" = "#ff9896"
 )
 ```
 

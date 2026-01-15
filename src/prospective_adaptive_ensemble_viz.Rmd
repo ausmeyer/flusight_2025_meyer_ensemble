@@ -132,6 +132,11 @@ for (h in 1:4) {
       sprintf('TwoStage-FrozenMu-bounded-wide-%d_h%d', v, h),
       sprintf('LGBM-bounded-wide-%d', v), h)
   }
+
+  # LGBM bounded wide 4 non-enhanced (uses default state lag features)
+  all_forecasts[[paste0('LGBM_bounded_wide_4_ne_h', h)]] <- load_all_prosp_files(
+    sprintf('TwoStage-FrozenMu-bounded-wide-4-ne_h%d', h),
+    'LGBM-bounded-wide-4-ne', h)
 }
 
 # Adaptive Ensemble - fetch historical from GitHub, use local only for latest
@@ -330,6 +335,7 @@ model_colors <- c(
   "LGBM-bounded-wide-2" = "#17becf",
   "LGBM-bounded-wide-3" = "#bcbd22",
   "LGBM-bounded-wide-4" = "#7f7f7f",
+  "LGBM-bounded-wide-4-ne" = "#ff7f0e",
   "LGBM-bounded-wide-5" = "#d62728"
 )
 
@@ -346,6 +352,7 @@ model_fills <- c(
   "LGBM-bounded-wide-2" = "#9edae5",
   "LGBM-bounded-wide-3" = "#dbdb8d",
   "LGBM-bounded-wide-4" = "#c7c7c7",
+  "LGBM-bounded-wide-4-ne" = "#ffbb78",
   "LGBM-bounded-wide-5" = "#ff9896"
 )
 ```
