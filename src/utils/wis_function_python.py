@@ -1,15 +1,21 @@
 import numpy as np
 
+
 def wis(observed, predicted, quantile_level, separate_results=False, weigh=True):
     """
     Calculate the Weighted Interval Score (WIS) for quantile-based forecasts.
 
+    Uses the quantile score (pinball loss) formulation, which is equivalent to
+    the interval score formulation but easier to compute correctly.
+
+    This implementation matches scoringutils::score() in R.
+
     Parameters:
-    observed (array-like): Observed values
+    observed (array-like): Observed values, shape (n_observations,)
     predicted (array-like): Predicted quantiles, shape (n_observations, n_quantiles)
     quantile_level (array-like): Quantile levels corresponding to predicted quantiles
     separate_results (bool): If True, return separate components of WIS
-    weigh (bool): If True, apply weights to the interval scores
+    weigh (bool): Unused, kept for backward compatibility
 
     Returns:
     If separate_results is False:
@@ -30,87 +36,63 @@ def wis(observed, predicted, quantile_level, separate_results=False, weigh=True)
     quantile_level = quantile_level[sort_idx]
     predicted = predicted[:, sort_idx]
 
-    # Use exact CDC logic to avoid divide-by-zero
-    # Find median index
-    median_idx = np.argmin(np.abs(quantile_level - 0.5))
-    
-    # Calculate alphas for symmetric intervals around median
-    alphas = 2 * np.abs(quantile_level[quantile_level < 0.5] - 0.5)
-    
-    # Weights: median weight (0.5) + interval weights (alpha/2)
-    if weigh:
-        weights = np.concatenate(([0.5], alphas/2))
-    else:
-        weights = np.ones(len(alphas) + 1)
-    
-    # Calculate scores
-    scores = []
-    
-    # Median component (absolute error)
-    median_score = np.abs(observed - predicted[:, median_idx])
-    scores.append(median_score)
-    
-    # Interval components
-    for alpha in alphas:
-        lower_q = 0.5 - alpha/2
-        upper_q = 0.5 + alpha/2
-        
-        # Find closest quantile indices
-        lower_idx = np.argmin(np.abs(quantile_level - lower_q))
-        upper_idx = np.argmin(np.abs(quantile_level - upper_q))
-        
-        lower_pred = predicted[:, lower_idx]
-        upper_pred = predicted[:, upper_idx]
-        
-        # Interval score components
-        interval_width = upper_pred - lower_pred
-        penalty_lower = (2/alpha) * np.maximum(0, lower_pred - observed)
-        penalty_upper = (2/alpha) * np.maximum(0, observed - upper_pred)
-        
-        interval_score = interval_width + penalty_lower + penalty_upper
-        scores.append(interval_score)
-    
-    # Combine scores with weights
-    scores_array = np.vstack(scores)  # Shape: (n_components, n_observations)
-    # NEW: CDC weighted-sum scaling
-    wis_values = np.sum(scores_array * weights[:, None], axis=0)
+    # Compute quantile scores (pinball loss) for each observation and quantile
+    # Formula: QS(tau) = 2 * |I(y <= q) - tau| * |y - q|
+    # Where I(y <= q) is 1 if observed <= predicted, 0 otherwise
+
+    # Expand observed to match predicted shape
+    obs_expanded = observed[:, np.newaxis]  # Shape: (n_obs, 1)
+
+    # Indicator: 1 if observed <= predicted, 0 otherwise
+    indicator = (obs_expanded <= predicted).astype(float)  # Shape: (n_obs, n_quantiles)
+
+    # Quantile scores
+    quantile_scores = 2 * np.abs(indicator - quantile_level) * np.abs(obs_expanded - predicted)
+
+    # WIS = mean of quantile scores across all quantiles
+    wis_values = np.mean(quantile_scores, axis=1)
 
     if separate_results:
-        # Extract components from scores_array for separate results
-        if len(scores) > 1:
-            # Build separate components from the calculated scores
-            dispersion_scores = []
-            underprediction_scores = []
-            overprediction_scores = []
-            
-            # Extract components from interval scores (skip median score at index 0)
-            for i, alpha in enumerate(alphas):
-                lower_q = 0.5 - alpha/2
-                upper_q = 0.5 + alpha/2
-                lower_idx = np.argmin(np.abs(quantile_level - lower_q))
-                upper_idx = np.argmin(np.abs(quantile_level - upper_q))
-                
-                lower_pred = predicted[:, lower_idx]
-                upper_pred = predicted[:, upper_idx]
-                
-                dispersion_scores.append(upper_pred - lower_pred)
-                underprediction_scores.append((2/alpha) * np.maximum(0, lower_pred - observed))
-                overprediction_scores.append((2/alpha) * np.maximum(0, observed - upper_pred))
-            
-            avg_dispersion = np.mean(dispersion_scores, axis=0) if dispersion_scores else np.zeros_like(observed)
-            avg_underprediction = np.mean(underprediction_scores, axis=0) if underprediction_scores else np.zeros_like(observed)
-            avg_overprediction = np.mean(overprediction_scores, axis=0) if overprediction_scores else np.zeros_like(observed)
-        else:
-            # Only median score available
-            avg_dispersion = np.zeros_like(observed)
-            avg_underprediction = np.zeros_like(observed)
-            avg_overprediction = np.zeros_like(observed)
-        
+        # Compute components for compatibility
+        # Find median index
+        median_idx = np.argmin(np.abs(quantile_level - 0.5))
+
+        # Dispersion: average interval width (using symmetric quantile pairs)
+        dispersion = np.zeros(n_obs)
+        underprediction = np.zeros(n_obs)
+        overprediction = np.zeros(n_obs)
+
+        n_intervals = 0
+        for i, tau in enumerate(quantile_level):
+            if tau < 0.5:
+                upper_tau = 1 - tau
+                upper_idx = np.argmin(np.abs(quantile_level - upper_tau))
+                if np.abs(quantile_level[upper_idx] - upper_tau) < 0.001:
+                    alpha = upper_tau - tau
+                    lower_pred = predicted[:, i]
+                    upper_pred = predicted[:, upper_idx]
+
+                    # Interval width
+                    width = upper_pred - lower_pred
+                    dispersion += (alpha / 2) * width
+
+                    # Penalties
+                    underprediction += (alpha / 2) * (2 / alpha) * np.maximum(0, observed - upper_pred)
+                    overprediction += (alpha / 2) * (2 / alpha) * np.maximum(0, lower_pred - observed)
+                    n_intervals += 1
+
+        # Normalize by number of intervals + 0.5 (for median)
+        if n_intervals > 0:
+            norm_factor = n_intervals + 0.5
+            dispersion = dispersion / norm_factor
+            underprediction = underprediction / norm_factor
+            overprediction = overprediction / norm_factor
+
         return {
             'wis': wis_values,
-            'dispersion': avg_dispersion,
-            'underprediction': avg_underprediction,
-            'overprediction': avg_overprediction
+            'dispersion': dispersion,
+            'underprediction': underprediction,
+            'overprediction': overprediction
         }
     else:
         return wis_values
