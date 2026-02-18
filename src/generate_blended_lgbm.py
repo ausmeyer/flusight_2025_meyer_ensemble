@@ -1,15 +1,15 @@
 #!/usr/bin/env python
 """
-Generate blended LGBM forecasts by combining t10 and t100 Stage-1 medians with persistence,
-then applying conformal prediction intervals.
+Generate blended LGBM forecasts by averaging t10 and t100 Stage-1 medians,
+then applying plain conformal prediction intervals.
 
 This script implements the proper blending workflow:
 1. Load t10 and t100 hyperparameters
 2. Train Stage-1 models for both to get raw medians
-3. Blend medians: 0.4*t10 + 0.4*t100 + 0.2*persistence
+3. Blend medians: 0.5*t10 + 0.5*t100
 4. Generate conformal residual quantiles using LAST SEASON's in-season errors
    - Residuals collected from Nov 1 - May 1 of previous season
-   - Weighted by calendar week proximity (same week = highest weight)
+   - Uses empirical residual quantiles (no week weighting, no median debias shift)
 5. Output as LGBM-blended (the only unbounded LGBM output for ensemble)
 
 Usage:
@@ -57,10 +57,9 @@ CDC_QUANTILES = np.array([
     0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.975, 0.99
 ])
 
-# Blending weights
-W_T10 = 0.4
-W_T100 = 0.4
-W_PERS = 0.2
+# Blending weights (plain average, no persistence)
+W_T10 = 0.5
+W_T100 = 0.5
 
 # Conformal settings - using last season's in-season residuals
 MIN_RESIDUALS_FOR_CONFORMAL = 4
@@ -69,9 +68,6 @@ SEASON_START_MONTH = 11  # November
 SEASON_START_DAY = 1
 SEASON_END_MONTH = 5     # May
 SEASON_END_DAY = 1
-# Week proximity weighting: weight = exp(-WEEK_DECAY * |week_diff|)
-# WEEK_DECAY = 0.1 means ~60% weight at 5 weeks apart, ~37% at 10 weeks
-WEEK_DECAY = 0.1
 # Cap on log-space residuals to avoid extreme outliers skewing the distribution
 # Set to 1.6 to align with bounded-wide sigma max (0.8 * 1.96 ≈ 1.57)
 RESIDUAL_CAP = 1.6
@@ -97,16 +93,9 @@ STATE_TO_FIPS = {
 }
 
 
-def weighted_percentile(values, weights, quantiles):
-    """Compute weighted percentiles using linear interpolation."""
-    values = np.array(values)
-    weights = np.array(weights)
-    sorter = np.argsort(values)
-    values = values[sorter]
-    weights = weights[sorter]
-    cumsum = np.cumsum(weights)
-    cdf = cumsum / cumsum[-1]
-    return np.interp(quantiles, cdf, values)
+def empirical_percentile(values, quantiles):
+    """Compute empirical percentiles."""
+    return np.quantile(np.asarray(values), quantiles)
 
 
 def is_in_flu_season(date: pd.Timestamp) -> bool:
@@ -130,6 +119,14 @@ def get_flu_season_year(date: pd.Timestamp) -> int:
         return date.year - 1
 
 
+def get_target_season_year(date: pd.Timestamp) -> int:
+    """Return most recent COMPLETED flu season year for residuals."""
+    current_season_year = get_flu_season_year(date)
+    if is_in_flu_season(date):
+        return current_season_year - 1
+    return current_season_year
+
+
 def get_week_of_season(date: pd.Timestamp) -> int:
     """Get the week number within the flu season (0 = first week of Nov).
 
@@ -145,16 +142,6 @@ def get_week_of_season(date: pd.Timestamp) -> int:
         # This shouldn't happen if is_in_flu_season is checked first
         days_since_start += 365
     return days_since_start // 7
-
-
-def week_proximity_weight(current_week: int, residual_week: int) -> float:
-    """Calculate weight based on week proximity within season.
-
-    Uses exponential decay based on week distance.
-    Same week = weight 1.0, farther weeks get lower weights.
-    """
-    week_diff = abs(current_week - residual_week)
-    return np.exp(-WEEK_DECAY * week_diff)
 
 
 def get_last_season_dates(current_date: pd.Timestamp, horizon: int) -> Tuple[pd.Timestamp, pd.Timestamp]:
@@ -280,7 +267,7 @@ class BlendedLGBMGenerator:
         This method:
         1. Generates blended forecasts for the validation period
         2. Computes and stores residuals for in-season dates (Nov-May)
-        3. Uses stored residuals with week-proximity weighting for conformal intervals
+        3. Uses stored residuals with plain conformal quantiles
 
         Args:
             t10_hyperparams: Hyperparameters for t10 models
@@ -341,12 +328,8 @@ class BlendedLGBMGenerator:
                     if mu_t10 is None or mu_t100 is None:
                         continue
 
-                    # Get persistence value
-                    last_value_row = self.data.loc[self.data['date'] == val_date, location]
-                    last_value = last_value_row.iloc[0] if len(last_value_row) > 0 else (mu_t10 + mu_t100) / 2
-
                     # Compute blended median
-                    blended_mu = W_T10 * mu_t10 + W_T100 * mu_t100 + W_PERS * last_value
+                    blended_mu = W_T10 * mu_t10 + W_T100 * mu_t100
                     blended_mu = max(0.0, blended_mu)
 
                     # Get target date and actual value
@@ -363,8 +346,7 @@ class BlendedLGBMGenerator:
                         'actual_value': actual_value,
                         'blended_mu': blended_mu,
                         'mu_t10': mu_t10,
-                        'mu_t100': mu_t100,
-                        'last_value': last_value
+                        'mu_t100': mu_t100
                     })
 
                     # Compute and store residual (only for in-season dates)
@@ -399,8 +381,8 @@ class BlendedLGBMGenerator:
         if output_dir and all_residuals:
             self.save_residuals(all_residuals, horizon, output_dir)
 
-        # PASS 2: Generate quantile forecasts using stored residuals with week-proximity weighting
-        print(f"\n  Pass 2: Generating conformal quantiles with week-proximity weighting...")
+        # PASS 2: Generate quantile forecasts using plain conformal residual quantiles
+        print(f"\n  Pass 2: Generating plain conformal quantiles...")
 
         for loc_idx, location in enumerate(locations):
             forecast_results = []
@@ -410,33 +392,27 @@ class BlendedLGBMGenerator:
             for pred in loc_preds:
                 val_date = pred['forecast_date']
                 blended_mu = pred['blended_mu']
-                current_week = get_week_of_season(val_date)
 
-                # Get residuals from the SAME SEASON (for in-season dates) or LAST SEASON
-                # For retrospective, use residuals from earlier in the same season
-                # that have targets observable before val_date
+                # For retrospective, use prior completed-season residuals that are observable.
+                target_season_year = get_target_season_year(val_date)
                 available_residuals = [
                     r for r in loc_resids
-                    if r['target_date'] < val_date  # must be observable
+                    if (r['target_date'] < val_date and r['season_year'] == target_season_year)
                 ]
 
-                # Apply week-proximity weighting
-                weighted_residuals = []
-                for r in available_residuals:
-                    weight = week_proximity_weight(current_week, r['week_of_season'])
-                    # Cap residuals to avoid extreme outliers
-                    res_log = np.clip(r['residual_log'], -RESIDUAL_CAP, RESIDUAL_CAP)
-                    weighted_residuals.append((res_log, weight))
+                residual_values = np.array([
+                    np.clip(r['residual_log'], -RESIDUAL_CAP, RESIDUAL_CAP)
+                    for r in available_residuals
+                ])
 
                 # Generate quantiles
-                if len(weighted_residuals) >= MIN_RESIDUALS_FOR_CONFORMAL:
+                if len(residual_values) >= MIN_RESIDUALS_FOR_CONFORMAL:
                     mu_log = np.log1p(blended_mu)
-                    res_vals = [r for r, w in weighted_residuals]
-                    res_wts = [w for r, w in weighted_residuals]
-
-                    residual_quantiles = weighted_percentile(res_vals, res_wts, CDC_QUANTILES)
+                    residual_values_centered = residual_values - np.median(residual_values)
+                    residual_quantiles = empirical_percentile(residual_values_centered, CDC_QUANTILES)
                     q_log = mu_log + residual_quantiles
                     quantile_forecasts = np.array([max(0.0, np.expm1(val)) for val in q_log])
+                    quantile_forecasts[np.where(CDC_QUANTILES == 0.5)[0][0]] = max(0.0, blended_mu)
                 else:
                     # Fallback: use empirical spread from blended median
                     spread = max(blended_mu * 0.3, 10.0)
@@ -452,8 +428,7 @@ class BlendedLGBMGenerator:
                     'blended_mu': blended_mu,
                     'mu_t10': pred['mu_t10'],
                     'mu_t100': pred['mu_t100'],
-                    'last_value': pred['last_value'],
-                    'n_residuals': len(weighted_residuals)
+                    'n_residuals': len(residual_values)
                 })
 
             all_forecasts[location] = forecast_results
@@ -500,6 +475,8 @@ class BlendedLGBMGenerator:
 
         print(f"  Locations: {len(locations)}")
         print(f"  Forecast from: {last_date.date()}")
+        target_season_year = get_target_season_year(last_date)
+        print(f"  Using residuals from season year: {target_season_year}")
 
         # Load pre-computed residuals if available
         residuals_df = None
@@ -509,8 +486,11 @@ class BlendedLGBMGenerator:
             except FileNotFoundError as e:
                 print(f"  Warning: {e}")
                 print(f"  Will use fallback spread for conformal intervals")
-
-        current_week = get_week_of_season(last_date)
+        if residuals_df is not None and len(residuals_df) > 0:
+            if 'season_year' in residuals_df.columns:
+                residuals_df = residuals_df[residuals_df['season_year'] == target_season_year]
+            else:
+                print("  Warning: residuals missing season_year, no season filter applied")
 
         for loc_idx, location in enumerate(locations):
             try:
@@ -539,46 +519,34 @@ class BlendedLGBMGenerator:
                     print(f"  [{loc_idx+1}/{len(locations)}] {location}: Skipped (no prediction)")
                     continue
 
-                # Get persistence
-                last_value_row = self.data.loc[self.data['date'] == last_date, location]
-                last_value = last_value_row.iloc[0] if len(last_value_row) > 0 else (mu_t10 + mu_t100) / 2
-
                 # Blend
-                blended_mu = W_T10 * mu_t10 + W_T100 * mu_t100 + W_PERS * last_value
+                blended_mu = W_T10 * mu_t10 + W_T100 * mu_t100
                 blended_mu = max(0.0, blended_mu)
 
                 target_date = last_date + pd.Timedelta(weeks=horizon)
 
                 # Get residuals for this location from saved data
-                weighted_residuals = []
+                residual_values = np.array([])
                 if residuals_df is not None:
                     loc_residuals = residuals_df[residuals_df['location'] == location]
-
-                    # Apply week-proximity weighting
-                    for _, row in loc_residuals.iterrows():
-                        weight = week_proximity_weight(current_week, row['week_of_season'])
-                        # Cap residuals to avoid extreme outliers
-                        res_log = np.clip(row['residual_log'], -RESIDUAL_CAP, RESIDUAL_CAP)
-                        weighted_residuals.append((res_log, weight))
+                    residual_values = np.clip(loc_residuals['residual_log'].to_numpy(), -RESIDUAL_CAP, RESIDUAL_CAP)
 
                 # Generate quantiles
-                if len(weighted_residuals) >= MIN_RESIDUALS_FOR_CONFORMAL:
+                if len(residual_values) >= MIN_RESIDUALS_FOR_CONFORMAL:
                     mu_log = np.log1p(blended_mu)
-
-                    res_vals = [r for r, w in weighted_residuals]
-                    res_wts = [w for r, w in weighted_residuals]
-
-                    residual_quantiles = weighted_percentile(res_vals, res_wts, CDC_QUANTILES)
+                    residual_values_centered = residual_values - np.median(residual_values)
+                    residual_quantiles = empirical_percentile(residual_values_centered, CDC_QUANTILES)
                     q_log = mu_log + residual_quantiles
                     quantile_forecasts = np.array([max(0.0, np.expm1(val)) for val in q_log])
-                    print(f"  [{loc_idx+1}/{len(locations)}] {location}: blended_mu={blended_mu:.1f}, {len(weighted_residuals)} residuals (week {current_week})")
+                    quantile_forecasts[np.where(CDC_QUANTILES == 0.5)[0][0]] = max(0.0, blended_mu)
+                    print(f"  [{loc_idx+1}/{len(locations)}] {location}: blended_mu={blended_mu:.1f}, {len(residual_values)} residuals")
                 else:
                     # Fallback: use empirical spread from blended median
                     spread = max(blended_mu * 0.3, 10.0)
                     quantile_forecasts = np.array([
                         max(0.0, blended_mu + norm.ppf(q) * spread) for q in CDC_QUANTILES
                     ])
-                    print(f"  [{loc_idx+1}/{len(locations)}] {location}: blended_mu={blended_mu:.1f}, fallback (only {len(weighted_residuals)} residuals)")
+                    print(f"  [{loc_idx+1}/{len(locations)}] {location}: blended_mu={blended_mu:.1f}, fallback (only {len(residual_values)} residuals)")
 
                 all_forecasts[location] = {
                     'forecast_date': last_date,
@@ -587,8 +555,7 @@ class BlendedLGBMGenerator:
                     'blended_mu': blended_mu,
                     'mu_t10': mu_t10,
                     'mu_t100': mu_t100,
-                    'last_value': last_value,
-                    'n_residuals': len(weighted_residuals)
+                    'n_residuals': len(residual_values)
                 }
 
             except Exception as e:

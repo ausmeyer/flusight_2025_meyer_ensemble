@@ -106,6 +106,39 @@ load_all_prosp_files <- function(base_pattern, model_name, file_horizon) {
   bind_rows(result)
 }
 
+# Helper to load JointTwoStagePool prospective files (single file contains all horizons)
+load_all_joint_prosp_files <- function(model_name = "JointTwoStagePool") {
+  files <- list.files(prosp_dir, pattern = '^JointTwoStagePool_prospective_(\\d{8})\\.csv$', full.names = TRUE)
+  if (length(files) == 0) return(NULL)
+
+  result <- lapply(files, function(path) {
+    ts_match <- regexpr("\\d{8}", basename(path))
+    base_date_str <- regmatches(basename(path), ts_match)
+    cdc_date <- as.Date(base_date_str, format = '%Y%m%d') + 7
+    cdc_date_str <- format(cdc_date, '%Y%m%d')
+
+    tryCatch({
+      df <- read_csv(path, show_col_types = FALSE)
+      if (!("horizon" %in% names(df))) return(NULL)
+      df %>%
+        filter(output_type == 'quantile') %>%
+        mutate(
+          model = model_name,
+          forecast_date = cdc_date_str,
+          reference_date = as.Date(reference_date),
+          target_end_date = as.Date(target_end_date),
+          location = as.character(location),
+          output_type_id = as.numeric(output_type_id),
+          value = as.numeric(value),
+          horizon = as.integer(horizon) + 1L
+        ) %>%
+        select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    }, error = function(e) NULL)
+  })
+
+  bind_rows(result)
+}
+
 # Load all prospective forecasts for all dates
 all_forecasts <- list()
 
@@ -118,7 +151,7 @@ for (h in 1:4) {
   all_forecasts[[paste0('SVM_h', h)]] <- load_all_prosp_files(
     sprintf('SVM_h%d', h), 'SVM', h)
 
-  # LGBM Blended (t10+t100+persistence with conformal CIs)
+  # LGBM Blended (0.5*t10 + 0.5*t100 with conformal CIs)
   all_forecasts[[paste0('LGBM_blended_h', h)]] <- load_all_prosp_files(
     sprintf('LGBM-blended_h%d', h), 'LGBM-blended', h)
 
@@ -138,6 +171,8 @@ for (h in 1:4) {
     sprintf('TwoStage-FrozenMu-bounded-wide-4-ne_h%d', h),
     'LGBM-bounded-wide-4-ne', h)
 }
+
+all_forecasts[['JointTwoStagePool']] <- load_all_joint_prosp_files('JointTwoStagePool')
 
 # Adaptive Ensemble - fetch historical from GitHub, use local only for latest
 # All forecast_date values now use CDC reference date convention (upcoming Saturday, YYYYMMDD)
@@ -327,6 +362,7 @@ model_colors <- c(
   "AdaptiveEnsemble" = "#cc5200",
   "AdaptiveEnsemble-hedge" = "#006d77",
   "AdaptiveEnsemble-meta" = "#9b2226",
+  "JointTwoStagePool" = "#264653",
   "ARIMA" = "#1f77b4",
   "SVM" = "#2ca02c",
   "LGBM-blended" = "#9467bd",
@@ -344,6 +380,7 @@ model_fills <- c(
   "AdaptiveEnsemble" = "#ff944d",
   "AdaptiveEnsemble-hedge" = "#83c5be",
   "AdaptiveEnsemble-meta" = "#e09f9a",
+  "JointTwoStagePool" = "#7fa6b8",
   "ARIMA" = "#7fbfff",
   "SVM" = "#90ee90",
   "LGBM-blended" = "#c9b3d9",

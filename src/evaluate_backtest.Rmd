@@ -293,6 +293,14 @@ local_forecasts <- bind_rows(
     dir_path = prospective_dir,
     file_pattern = "^TwoStage-FrozenMu-bounded.*_h[1-4]_prospective_[0-9]{8}\\.csv$",
     season_start = season_start_date
+  ),
+  load_backtest_ensemble(
+    dir_path = prospective_dir,
+    file_pattern = "^JointTwoStagePool_prospective_[0-9]{8}\\.csv$",
+    season_start = season_start_date,
+    model_id = "JointTwoStagePool",
+    reference_shift_days = 0,
+    allowed_refs = NULL
   )
 ) %>%
   distinct(model_id, reference_date, target, target_end_date, location, horizon,

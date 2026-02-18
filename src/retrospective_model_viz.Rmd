@@ -136,6 +136,81 @@ if (length(ens_files) > 0) {
   all_forecasts[['Ensemble']] <- bind_rows(ens_list)
 }
 
+# Adaptive Ensemble - Hedge
+ens_hedge_files <- list.files(
+  file.path(root_prefix, 'forecasts/retrospective/ensemble_hedge'),
+  pattern = 'AdaptiveEnsemble_hedge_retrospective_.*\\.csv',
+  full.names = TRUE
+)
+
+if (length(ens_hedge_files) > 0) {
+  ens_hedge_list <- lapply(ens_hedge_files, function(fp) {
+    read_csv(fp, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble-hedge',
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, reference_date, horizon, target_end_date, location, output_type_id, value)
+  })
+  all_forecasts[['EnsembleHedge']] <- bind_rows(ens_hedge_list)
+}
+
+# Adaptive Ensemble - Meta
+ens_meta_files <- list.files(
+  file.path(root_prefix, 'forecasts/retrospective/ensemble_meta'),
+  pattern = 'AdaptiveEnsemble_meta_retrospective_.*\\.csv',
+  full.names = TRUE
+)
+
+if (length(ens_meta_files) > 0) {
+  ens_meta_list <- lapply(ens_meta_files, function(fp) {
+    read_csv(fp, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble-meta',
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, reference_date, horizon, target_end_date, location, output_type_id, value)
+  })
+  all_forecasts[['EnsembleMeta']] <- bind_rows(ens_meta_list)
+}
+
+# Joint Two-Stage pooled model retrospective backtest outputs
+joint_backtest_files <- list.files(
+  file.path(root_prefix, 'forecasts/retrospective/joint_twostage_pool'),
+  pattern = 'JointTwoStagePool_backtest_.*\\.csv',
+  full.names = TRUE
+)
+
+if (length(joint_backtest_files) > 0) {
+  joint_list <- lapply(joint_backtest_files, function(fp) {
+    read_csv(fp, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'JointTwoStagePool',
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, reference_date, horizon, target_end_date, location, output_type_id, value)
+  })
+  all_forecasts[['JointTwoStagePool']] <- bind_rows(joint_list)
+}
+
 # Combine and summarize
 forecasts_all <- bind_rows(all_forecasts) %>%
   filter(!is.na(value), target_end_date >= as.Date('2024-10-01'))
@@ -165,6 +240,9 @@ all_models <- sort(unique(forecast_summary$model))
 # Model colors
 model_colors <- c(
   "AdaptiveEnsemble" = "#cc5200",
+  "AdaptiveEnsemble-hedge" = "#006d77",
+  "AdaptiveEnsemble-meta" = "#9b2226",
+  "JointTwoStagePool" = "#264653",
   "FluSight-baseline" = "#555555",
   "ARIMA" = "#1f77b4",
   "SVM" = "#2ca02c",
@@ -181,6 +259,9 @@ model_colors <- c(
 # Fill colors (lighter versions)
 model_fills <- c(
   "AdaptiveEnsemble" = "#ff944d",
+  "AdaptiveEnsemble-hedge" = "#83c5be",
+  "AdaptiveEnsemble-meta" = "#e09f9a",
+  "JointTwoStagePool" = "#7fa6b8",
   "FluSight-baseline" = "#999999",
   "ARIMA" = "#7fbfff",
   "SVM" = "#90ee90",

@@ -383,7 +383,7 @@ class BatchRetrospectiveForecastGenerator:
         # This allows us to blend t10 + t100 + persistence even when running one model at a time
         other_model_medians = {}  # Dict of (location, target_date) -> {'t10': val, 't100': val}
 
-        if not is_bounded:
+        if not is_bounded and not is_bounded_wide:
             # Attempt to load existing retrospective forecasts from both t10 and t100
             for model_variant in ['lgbm_enhanced_t10', 'lgbm_enhanced_t100']:
                 forecast_file = os.path.join(
@@ -604,7 +604,7 @@ class BatchRetrospectiveForecastGenerator:
                     # For unbounded models, compute blended median from t10, t100, and persistence
                     blended_mu = mu_pred_corrected  # Default to current model's prediction
 
-                    if not is_bounded:
+                    if not is_bounded and not is_bounded_wide:
                         # Look up pre-computed medians from other model variants
                         blend_key = (location, target_date)
                         other_medians = other_model_medians.get(blend_key, {})
@@ -736,8 +736,8 @@ class BatchRetrospectiveForecastGenerator:
                         'quantile_forecasts': np.array(quantile_forecasts),
                         'mu_pred': mu_pred_corrected,  # This is blended_mu for unbounded, raw for bounded
                         'mu_pred_raw': mu_pred_raw_linear,  # Original model prediction before blending
-                        'last_value': last_value if not is_bounded else None,  # Persistence value
-                        'n_residuals': len(residuals_log) if not is_bounded else 0
+                        'last_value': last_value if not is_bounded and not is_bounded_wide else None,  # Persistence value
+                        'n_residuals': len(residuals_log) if not is_bounded and not is_bounded_wide else 0
                     })
 
                 except Exception as e:

@@ -21,6 +21,10 @@ INCLUDE_LGBM_BOUNDED_WIDE_3 <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_4 <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_4_NE <- TRUE
 INCLUDE_LGBM_BOUNDED_WIDE_5 <- TRUE
+INCLUDE_JOINT_TWOSTAGE <- FALSE
+JOINT_RETRO_FILE <- NA_character_
+JOINT_PROSP_FILE <- NA_character_
+JOINT_REFERENCE_SHIFT_DAYS <- -7
 AS_OF_OVERRIDE <- NA_character_
 
 META_HISTORY_WEEKS <- 26
@@ -44,8 +48,27 @@ while (i <= length(args)) {
   if (key == '--include-lgbm-bounded-wide-4') { INCLUDE_LGBM_BOUNDED_WIDE_4 <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--include-lgbm-bounded-wide-4-ne') { INCLUDE_LGBM_BOUNDED_WIDE_4_NE <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
   if (key == '--include-lgbm-bounded-wide-5') { INCLUDE_LGBM_BOUNDED_WIDE_5 <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
+  if (key == '--include-joint-twostage') { INCLUDE_JOINT_TWOSTAGE <- tolower(val) %in% c('1','true','t','yes','y'); i <- i + 2; next }
+  if (key == '--joint-retro-file') { JOINT_RETRO_FILE <- val; i <- i + 2; next }
+  if (key == '--joint-prosp-file') { JOINT_PROSP_FILE <- val; i <- i + 2; next }
+  if (key == '--joint-reference-shift-days') { JOINT_REFERENCE_SHIFT_DAYS <- as.integer(val); i <- i + 2; next }
   if (key == '--asof-date')      { AS_OF_OVERRIDE <- val; i <- i + 2; next }
   i <- i + 1
+}
+
+latest_file <- function(dir_path, pattern) {
+  if (!dir.exists(dir_path)) return(NA_character_)
+  files <- list.files(dir_path, pattern = pattern, full.names = TRUE)
+  if (length(files) == 0) return(NA_character_)
+  info <- file.info(files)
+  files[order(info$mtime, decreasing = TRUE)][1]
+}
+
+if (is.na(JOINT_RETRO_FILE)) {
+  JOINT_RETRO_FILE <- latest_file("forecasts/retrospective/joint_twostage_pool", "^JointTwoStagePool_backtest_.*\\.csv$")
+}
+if (is.na(JOINT_PROSP_FILE)) {
+  JOINT_PROSP_FILE <- latest_file("forecasts/prospective", "^JointTwoStagePool_prospective_\\d{8}\\.csv$")
 }
 
 latest_stitched <- function() {
@@ -72,6 +95,15 @@ submission_ref_date <- as_of_date + 7
 submission_ref_ts   <- format(submission_ref_date, "%Y%m%d")
 
 message(sprintf("Prospective meta ensemble for as_of=%s (Submission Ref Date=%s)", as_of_str, format(submission_ref_date, "%Y-%m-%d")))
+if (INCLUDE_JOINT_TWOSTAGE) {
+  message(sprintf("JointTwoStagePool enabled. retro=%s | prosp=%s | ref_shift_days=%d",
+                  ifelse(is.na(JOINT_RETRO_FILE), "NA", JOINT_RETRO_FILE),
+                  ifelse(is.na(JOINT_PROSP_FILE), "NA", JOINT_PROSP_FILE),
+                  JOINT_REFERENCE_SHIFT_DAYS))
+  if (is.na(JOINT_PROSP_FILE) || !file.exists(JOINT_PROSP_FILE)) {
+    message("JointTwoStagePool prospective file not found; it will affect weighting only if retrospective file is available.")
+  }
+}
 
 location_to_fips <- c(
   'Alabama' = '01', 'Alaska' = '02', 'Arizona' = '04', 'Arkansas' = '05',
@@ -310,6 +342,21 @@ load_retro_for_h <- function(h) {
     if ('quantile' %in% names(svm_df)) svm_df <- svm_df %>% rename(output_type_id = quantile)
     lst$SVM <- svm_df
   }
+  if (INCLUDE_JOINT_TWOSTAGE && !is.na(JOINT_RETRO_FILE) && file.exists(JOINT_RETRO_FILE)) {
+    joint_df <- read_csv(JOINT_RETRO_FILE, show_col_types = FALSE)
+    needed <- c("reference_date", "horizon", "target_end_date", "location", "output_type", "output_type_id", "value")
+    if (all(needed %in% names(joint_df))) {
+      joint_df <- joint_df %>%
+        mutate(
+          horizon = as.integer(horizon),
+          reference_date = as.Date(reference_date) + JOINT_REFERENCE_SHIFT_DAYS
+        ) %>%
+        filter(output_type == "quantile", horizon == (h - 1))
+      if (nrow(joint_df) > 0) {
+        lst$JointTwoStagePool <- joint_df
+      }
+    }
+  }
   lst
 }
 
@@ -342,6 +389,32 @@ load_prosp_for_h <- function(h, ts) {
   lgbm_bounded_wide_4_ne_fp <- file.path(pdir, sprintf('TwoStage-FrozenMu-bounded-wide-4-ne_h%d_prospective_%s.csv', h, ts))
   if (INCLUDE_LGBM_BOUNDED_WIDE_4_NE && file.exists(lgbm_bounded_wide_4_ne_fp)) {
     lst$LGBM_bounded_wide_4_ne <- read_csv(lgbm_bounded_wide_4_ne_fp, show_col_types = FALSE)
+  }
+  if (INCLUDE_JOINT_TWOSTAGE && !is.na(JOINT_PROSP_FILE) && file.exists(JOINT_PROSP_FILE)) {
+    joint_df <- read_csv(JOINT_PROSP_FILE, show_col_types = FALSE)
+    needed <- c("reference_date", "horizon", "target_end_date", "location", "output_type", "output_type_id", "value")
+    if (all(needed %in% names(joint_df))) {
+      joint_df <- joint_df %>%
+        mutate(
+          horizon = as.integer(horizon),
+          reference_date = as.Date(reference_date) + JOINT_REFERENCE_SHIFT_DAYS
+        ) %>%
+        filter(output_type == "quantile", horizon == (h - 1))
+      if (nrow(joint_df) > 0) {
+        if (any(joint_df$reference_date == as_of_date, na.rm = TRUE)) {
+          joint_df <- joint_df %>% filter(reference_date == as_of_date)
+        } else if (any(joint_df$reference_date == submission_ref_date, na.rm = TRUE)) {
+          # Fallback for cases where shift=0 or input already uses CDC reference dates.
+          joint_df <- joint_df %>% filter(reference_date == submission_ref_date)
+        } else {
+          latest_ref <- max(joint_df$reference_date, na.rm = TRUE)
+          joint_df <- joint_df %>% filter(reference_date == latest_ref)
+        }
+      }
+      if (nrow(joint_df) > 0) {
+        lst$JointTwoStagePool <- joint_df
+      }
+    }
   }
   lst
 }

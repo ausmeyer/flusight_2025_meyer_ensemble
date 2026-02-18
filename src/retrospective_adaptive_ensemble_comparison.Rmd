@@ -184,6 +184,50 @@ load_local_forecasts_from_filename <- function(dir_path, file_pattern, season_st
   bind_rows(out) %>%
     filter(reference_date >= season_start)
 }
+
+load_local_forecasts_with_horizon_column <- function(model_id, dir_path, file_pattern, season_start, reference_shift_days = 0) {
+  empty <- tibble::tibble(
+    reference_date = as.Date(character()),
+    target = character(),
+    horizon = integer(),
+    target_end_date = as.Date(character()),
+    location = character(),
+    output_type = character(),
+    output_type_id = character(),
+    value = double(),
+    model_id = character()
+  )
+  if (!dir.exists(dir_path)) {
+    return(empty)
+  }
+  files <- list.files(dir_path, pattern = file_pattern, full.names = TRUE)
+  if (length(files) == 0) {
+    return(empty)
+  }
+  out <- lapply(files, function(file_path) {
+    df <- readr::read_csv(file_path, show_col_types = FALSE)
+    if (!("horizon" %in% names(df))) {
+      return(empty)
+    }
+    df %>%
+      filter(output_type == "quantile") %>%
+      mutate(
+        reference_date = as.Date(reference_date) + reference_shift_days,
+        target_end_date = as.Date(target_end_date),
+        horizon = as.integer(horizon),
+        location = as.character(location),
+        location = ifelse(grepl("^[0-9]+$", location),
+                          sprintf("%02d", as.integer(location)),
+                          location),
+        output_type_id = as.character(output_type_id),
+        model_id = model_id
+      ) %>%
+      select(reference_date, target, horizon, target_end_date, location,
+             output_type, output_type_id, value, model_id)
+  })
+  bind_rows(out) %>%
+    filter(reference_date >= season_start)
+}
 ```
 
 Generated on: `r Sys.time()`
@@ -237,6 +281,13 @@ local_forecasts <- bind_rows(
     dir_path = prospective_dir,
     file_pattern = "^TwoStage-FrozenMu-bounded.*_h[1-4]_prospective_[0-9]{8}\\.csv$",
     season_start = season_start_date
+  ),
+  load_local_forecasts_with_horizon_column(
+    model_id = "JointTwoStagePool",
+    dir_path = prospective_dir,
+    file_pattern = "^JointTwoStagePool_prospective_[0-9]{8}\\.csv$",
+    season_start = season_start_date,
+    reference_shift_days = 0
   )
 ) %>%
   distinct(model_id, reference_date, target, target_end_date, location, horizon,

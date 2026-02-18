@@ -1,0 +1,853 @@
+---
+title: "Prospective Forecast Visualization"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+    theme: flatly
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tidyr)
+library(shiny)
+
+# Determine root path prefix
+if (dir.exists('../data/imputed_sets')) {
+  root_prefix <- '..'
+} else if (dir.exists('data/imputed_sets')) {
+  root_prefix <- '.'
+} else {
+  stop("Could not locate data/imputed_sets/ directory")
+}
+
+TEST_DIR <- "joint_twostage_pool_test"
+TEST_JOINT_MODEL <- "JointTwoStagePool"
+KNN_TEST_DIR <- "joint_knn3_pool_test"
+KNN_TEST_MODEL <- "JointKNN3Pool"
+TEST_HISTORY_START_DATE <- as.Date("2025-11-19")
+
+# Load ground truth
+data_dir <- file.path(root_prefix, 'data/imputed_sets')
+
+# Helper: latest file by pattern
+latest_file <- function(dir, pattern) {
+  files <- list.files(dir, pattern = pattern, full.names = TRUE)
+  if (length(files) == 0) return(NA_character_)
+  files[order(files)][length(files)]
+}
+
+actual_path <- latest_file(data_dir, '^imputed_and_stitched_hosp_.*\\.csv$')
+actual_raw <- read_csv(actual_path, show_col_types = FALSE)
+
+# FIPS mappings
+location_to_fips <- c(
+  'Alabama'='01','Alaska'='02','Arizona'='04','Arkansas'='05','California'='06','Colorado'='08',
+  'Connecticut'='09','Delaware'='10','District of Columbia'='11','Florida'='12','Georgia'='13',
+  'Hawaii'='15','Idaho'='16','Illinois'='17','Indiana'='18','Iowa'='19','Kansas'='20',
+  'Kentucky'='21','Louisiana'='22','Maine'='23','Maryland'='24','Massachusetts'='25',
+  'Michigan'='26','Minnesota'='27','Mississippi'='28','Missouri'='29','Montana'='30',
+  'Nebraska'='31','Nevada'='32','New Hampshire'='33','New Jersey'='34','New Mexico'='35',
+  'New York'='36','North Carolina'='37','North Dakota'='38','Ohio'='39','Oklahoma'='40',
+  'Oregon'='41','Pennsylvania'='42','Puerto Rico'='72','Rhode Island'='44','South Carolina'='45',
+  'South Dakota'='46','Tennessee'='47','Texas'='48','Utah'='49','Vermont'='50','Virginia'='51',
+  'Washington'='53','West Virginia'='54','Wisconsin'='55','Wyoming'='56','US'='US'
+)
+fips_to_name <- setNames(names(location_to_fips), location_to_fips)
+
+# All state names (excluding US and PR for state selector)
+all_states <- sort(names(location_to_fips)[!names(location_to_fips) %in% c('US', 'Puerto Rico')])
+
+# Prepare ground truth (since 2024-09-01 for current season context)
+actual_data <- actual_raw %>%
+  transmute(
+    location = location_to_fips[location_name],
+    location_name = location_name,
+    date = as.Date(date),
+    actual_value = total_hosp
+  ) %>%
+  filter(!is.na(location), !is.na(actual_value), date >= as.Date('2024-09-01'))
+
+# Prospective directory
+prosp_dir <- file.path(root_prefix, 'forecasts/prospective')
+test_output_dir <- file.path(root_prefix, TEST_DIR, 'outputs')
+knn_test_output_dir <- file.path(root_prefix, KNN_TEST_DIR, 'outputs')
+test_hedge_prosp_dir <- file.path(test_output_dir, 'ensemble_hedge')
+
+# Helper to load ALL prospective forecast files matching a pattern (returns list by date)
+# Base model filenames use prior Saturday, but we convert to CDC reference date (upcoming Saturday)
+load_all_prosp_files <- function(base_pattern, model_name, file_horizon) {
+  # Pattern like: ARIMA_h1_prospective_(\d{8})\.csv
+  full_pattern <- sprintf('%s_prospective_(\\d{8})\\.csv', base_pattern)
+  files <- list.files(prosp_dir, pattern = full_pattern, full.names = TRUE)
+  if (length(files) == 0) return(NULL)
+
+  result <- lapply(files, function(path) {
+    # Extract date from filename (base model date = prior Saturday)
+    ts_match <- regexpr("\\d{8}", basename(path))
+    base_date_str <- regmatches(basename(path), ts_match)
+
+    # Convert to CDC reference date (add 7 days)
+    cdc_date <- as.Date(base_date_str, format = '%Y%m%d') + 7
+    cdc_date_str <- format(cdc_date, '%Y%m%d')
+
+    tryCatch({
+      df <- read_csv(path, show_col_types = FALSE) %>%
+        filter(output_type == 'quantile') %>%
+        mutate(
+          model = model_name,
+          forecast_date = cdc_date_str,  # Use CDC reference date for consistency
+          reference_date = as.Date(reference_date),
+          target_end_date = as.Date(target_end_date),
+          location = as.character(location),
+          output_type_id = as.numeric(output_type_id),
+          value = as.numeric(value),
+          horizon = file_horizon
+        ) %>%
+        select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    }, error = function(e) NULL)
+  })
+
+  bind_rows(result)
+}
+
+load_test_joint_prosp_file <- function() {
+  files <- list.files(test_output_dir, pattern = '^prospective.*\\.csv$', full.names = TRUE)
+  if (length(files) == 0) return(NULL)
+
+  file_info <- file.info(files)
+  latest_path <- files[order(file_info$mtime, decreasing = TRUE)][1]
+
+  tryCatch({
+    read_csv(latest_path, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = TEST_JOINT_MODEL,
+        forecast_date = format(as.Date(reference_date), '%Y%m%d'),
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+  }, error = function(e) {
+    message(sprintf("Could not load test joint prospective file %s: %s", basename(latest_path), e$message))
+    NULL
+  })
+}
+
+load_test_joint_backtest_file <- function() {
+  files <- list.files(test_output_dir, pattern = '^backtest_cov.*\\.csv$', full.names = TRUE)
+  if (length(files) == 0) return(NULL)
+
+  file_info <- file.info(files)
+  latest_path <- files[order(file_info$mtime, decreasing = TRUE)][1]
+
+  tryCatch({
+    read_csv(latest_path, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = paste0(TEST_JOINT_MODEL, '-backtest'),
+        forecast_date = format(as.Date(reference_date), '%Y%m%d'),
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      filter(reference_date >= TEST_HISTORY_START_DATE) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+  }, error = function(e) {
+    message(sprintf("Could not load test joint backtest file %s: %s", basename(latest_path), e$message))
+    NULL
+  })
+}
+
+load_test_knn_backtest_file <- function() {
+  files <- list.files(knn_test_output_dir, pattern = '^backtest_cov.*\\.csv$', full.names = TRUE)
+  if (length(files) == 0) return(NULL)
+
+  file_info <- file.info(files)
+  latest_path <- files[order(file_info$mtime, decreasing = TRUE)][1]
+
+  tryCatch({
+    read_csv(latest_path, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = paste0(KNN_TEST_MODEL, '-backtest'),
+        forecast_date = format(as.Date(reference_date), '%Y%m%d'),
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      filter(reference_date >= TEST_HISTORY_START_DATE) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+  }, error = function(e) {
+    message(sprintf("Could not load test KNN backtest file %s: %s", basename(latest_path), e$message))
+    NULL
+  })
+}
+
+load_test_hedge_backtest_files <- function() {
+  files <- list.files(
+    file.path(test_output_dir, 'ensemble_hedge_retrospective'),
+    pattern = '^AdaptiveEnsemble_hedge_retrospective_\\d{8}\\.csv$',
+    full.names = TRUE
+  )
+  if (length(files) == 0) return(NULL)
+
+  result <- lapply(files, function(path) {
+    ts_match <- regexpr("\\d{8}", basename(path))
+    cdc_date_str <- regmatches(basename(path), ts_match)
+
+    tryCatch({
+      read_csv(path, show_col_types = FALSE) %>%
+        filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble-hedge-test-backtest',
+        forecast_date = cdc_date_str,
+        reference_date = as.Date(reference_date),
+          target_end_date = as.Date(target_end_date),
+          location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+        filter(reference_date >= TEST_HISTORY_START_DATE) %>%
+        select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    }, error = function(e) {
+      message(sprintf("Could not load test hedge backtest file %s: %s", basename(path), e$message))
+      NULL
+    })
+  })
+
+  bind_rows(result)
+}
+
+# Load all prospective forecasts for all dates
+all_forecasts <- list()
+
+for (h in 1:4) {
+  # ARIMA
+  all_forecasts[[paste0('ARIMA_h', h)]] <- load_all_prosp_files(
+    sprintf('ARIMA_h%d', h), 'ARIMA', h)
+
+  # SVM
+  all_forecasts[[paste0('SVM_h', h)]] <- load_all_prosp_files(
+    sprintf('SVM_h%d', h), 'SVM', h)
+
+  # LGBM Blended (t10+t100+persistence with conformal CIs)
+  all_forecasts[[paste0('LGBM_blended_h', h)]] <- load_all_prosp_files(
+    sprintf('LGBM-blended_h%d', h), 'LGBM-blended', h)
+
+  # LGBM bounded
+  all_forecasts[[paste0('LGBM_bounded_h', h)]] <- load_all_prosp_files(
+    sprintf('TwoStage-FrozenMu-bounded_h%d', h), 'LGBM-bounded', h)
+
+  # LGBM bounded wide variants 1-5
+  for (v in 1:5) {
+    all_forecasts[[paste0('LGBM_bounded_wide_', v, '_h', h)]] <- load_all_prosp_files(
+      sprintf('TwoStage-FrozenMu-bounded-wide-%d_h%d', v, h),
+      sprintf('LGBM-bounded-wide-%d', v), h)
+  }
+
+  # LGBM bounded wide 4 non-enhanced (uses default state lag features)
+  all_forecasts[[paste0('LGBM_bounded_wide_4_ne_h', h)]] <- load_all_prosp_files(
+    sprintf('TwoStage-FrozenMu-bounded-wide-4-ne_h%d', h),
+    'LGBM-bounded-wide-4-ne', h)
+}
+
+# Adaptive Ensemble - fetch historical from GitHub, use local only for latest
+# All forecast_date values now use CDC reference date convention (upcoming Saturday, YYYYMMDD)
+
+github_base_url <- 'https://raw.githubusercontent.com/cdcepi/FluSight-forecast-hub/main/model-output/MIGHTE-Nsemble'
+
+# 2024-25 season CDC dates available on GitHub
+github_ensemble_dates <- c('2025-11-22', '2025-11-29', '2025-12-06', '2025-12-13', '2025-12-20', '2025-12-27', '2026-01-03', '2026-01-10')
+
+# Find all local ensemble files (uses CDC date convention)
+local_ens_files <- list.files(prosp_dir, pattern = '^AdaptiveEnsemble_prospective_\\d{8}\\.csv$', full.names = TRUE)
+local_hedge_files <- list.files(prosp_dir, pattern = '^AdaptiveEnsemble-hedge_prospective_\\d{8}\\.csv$', full.names = TRUE)
+local_meta_files <- list.files(prosp_dir, pattern = '^AdaptiveEnsemble-meta_prospective_\\d{8}\\.csv$', full.names = TRUE)
+test_hedge_files <- list.files(test_hedge_prosp_dir, pattern = '^AdaptiveEnsemble-hedge_prospective_\\d{8}\\.csv$', full.names = TRUE)
+local_ens_dates <- if (length(local_ens_files) > 0) {
+  sapply(local_ens_files, function(f) {
+    m <- regexpr("\\d{8}", basename(f))
+    regmatches(basename(f), m)
+  })
+} else {
+  character(0)
+}
+
+# Load historical ensemble from GitHub
+ens_list <- list()
+
+for (cdc_date in github_ensemble_dates) {
+  # Convert to YYYYMMDD format for forecast_date
+  cdc_date_str <- gsub('-', '', cdc_date)
+
+  # Skip if we have a local file for this date (prefer local files)
+  if (cdc_date_str %in% local_ens_dates) next
+
+  url <- sprintf('%s/%s-MIGHTE-Nsemble.csv', github_base_url, cdc_date)
+
+  tryCatch({
+    df <- read_csv(url, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble',
+        forecast_date = cdc_date_str,  # Use CDC date (YYYYMMDD)
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L  # Convert 0-based to 1-based
+      ) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    ens_list[[cdc_date]] <- df
+  }, error = function(e) {
+    message(sprintf("Could not fetch ensemble from GitHub for %s: %s", cdc_date, e$message))
+  })
+}
+
+# Load all local ensemble files
+for (local_file in local_ens_files) {
+  # Extract date from filename
+  m <- regexpr("\\d{8}", basename(local_file))
+  local_cdc_date <- regmatches(basename(local_file), m)
+
+  tryCatch({
+    df <- read_csv(local_file, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble',
+        forecast_date = local_cdc_date,  # Use CDC date (YYYYMMDD)
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    ens_list[[paste0('local_', local_cdc_date)]] <- df
+  }, error = function(e) {
+    message(sprintf("Could not load local ensemble %s: %s", basename(local_file), e$message))
+  })
+}
+
+if (length(ens_list) > 0) {
+  all_forecasts[['Ensemble']] <- bind_rows(ens_list)
+}
+
+# Load all local hedge ensemble files
+hedge_list <- list()
+for (local_file in local_hedge_files) {
+  # Extract date from filename
+  m <- regexpr("\\d{8}", basename(local_file))
+  local_cdc_date <- regmatches(basename(local_file), m)
+
+  tryCatch({
+    df <- read_csv(local_file, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble-hedge',
+        forecast_date = local_cdc_date,  # Use CDC date (YYYYMMDD)
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    hedge_list[[paste0('local_', local_cdc_date)]] <- df
+  }, error = function(e) {
+    message(sprintf("Could not load local hedge ensemble %s: %s", basename(local_file), e$message))
+  })
+}
+
+if (length(hedge_list) > 0) {
+  all_forecasts[['AdaptiveEnsemble-hedge']] <- bind_rows(hedge_list)
+}
+
+# Load all test-module hedge ensemble files (directory-local output)
+test_hedge_list <- list()
+for (local_file in test_hedge_files) {
+  m <- regexpr("\\d{8}", basename(local_file))
+  local_cdc_date <- regmatches(basename(local_file), m)
+
+  tryCatch({
+    df <- read_csv(local_file, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble-hedge-test',
+        forecast_date = local_cdc_date,
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    test_hedge_list[[paste0('local_test_', local_cdc_date)]] <- df
+  }, error = function(e) {
+    message(sprintf("Could not load test hedge ensemble %s: %s", basename(local_file), e$message))
+  })
+}
+
+if (length(test_hedge_list) > 0) {
+  all_forecasts[['AdaptiveEnsemble-hedge-test']] <- bind_rows(test_hedge_list)
+}
+
+test_hedge_backtest_df <- load_test_hedge_backtest_files()
+if (!is.null(test_hedge_backtest_df) && nrow(test_hedge_backtest_df) > 0) {
+  all_forecasts[['AdaptiveEnsemble-hedge-test-backtest']] <- test_hedge_backtest_df
+}
+
+# Load all local meta ensemble files
+meta_list <- list()
+for (local_file in local_meta_files) {
+  # Extract date from filename
+  m <- regexpr("\\d{8}", basename(local_file))
+  local_cdc_date <- regmatches(basename(local_file), m)
+
+  tryCatch({
+    df <- read_csv(local_file, show_col_types = FALSE) %>%
+      filter(output_type == 'quantile') %>%
+      mutate(
+        model = 'AdaptiveEnsemble-meta',
+        forecast_date = local_cdc_date,  # Use CDC date (YYYYMMDD)
+        reference_date = as.Date(reference_date),
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        horizon = as.integer(horizon) + 1L
+      ) %>%
+      select(model, forecast_date, reference_date, horizon, target_end_date, location, output_type_id, value)
+    meta_list[[paste0('local_', local_cdc_date)]] <- df
+  }, error = function(e) {
+    message(sprintf("Could not load local meta ensemble %s: %s", basename(local_file), e$message))
+  })
+}
+
+if (length(meta_list) > 0) {
+  all_forecasts[['AdaptiveEnsemble-meta']] <- bind_rows(meta_list)
+}
+
+# Load directory-local joint model prospective output
+test_joint_df <- load_test_joint_prosp_file()
+if (!is.null(test_joint_df) && nrow(test_joint_df) > 0) {
+  all_forecasts[[TEST_JOINT_MODEL]] <- test_joint_df
+}
+
+test_joint_backtest_df <- load_test_joint_backtest_file()
+if (!is.null(test_joint_backtest_df) && nrow(test_joint_backtest_df) > 0) {
+  all_forecasts[[paste0(TEST_JOINT_MODEL, '-backtest')]] <- test_joint_backtest_df
+}
+
+test_knn_backtest_df <- load_test_knn_backtest_file()
+if (!is.null(test_knn_backtest_df) && nrow(test_knn_backtest_df) > 0) {
+  all_forecasts[[paste0(KNN_TEST_MODEL, '-backtest')]] <- test_knn_backtest_df
+}
+
+# Combine all forecasts
+forecasts_all <- bind_rows(all_forecasts) %>%
+  filter(!is.na(value))
+
+# Get all unique forecast dates
+all_forecast_dates <- sort(unique(forecasts_all$forecast_date), decreasing = TRUE)
+latest_date <- if (length(all_forecast_dates) > 0) all_forecast_dates[1] else ""
+
+# Format dates for display (YYYYMMDD -> YYYY-MM-DD)
+format_date_display <- function(d) {
+  paste0(substr(d, 1, 4), "-", substr(d, 5, 6), "-", substr(d, 7, 8))
+}
+
+date_choices <- setNames(all_forecast_dates, sapply(all_forecast_dates, format_date_display))
+
+# Summarize quantiles per model/horizon/location/forecast_date
+forecast_summary <- forecasts_all %>%
+  group_by(model, horizon, forecast_date, reference_date, target_end_date, location) %>%
+  summarise(
+    q025 = value[which.min(abs(output_type_id - 0.025))],
+    q25 = value[which.min(abs(output_type_id - 0.25))],
+    median = value[which.min(abs(output_type_id - 0.5))],
+    q75 = value[which.min(abs(output_type_id - 0.75))],
+    q975 = value[which.min(abs(output_type_id - 0.975))],
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    q025 = pmin(q025, q25, median, na.rm = TRUE),
+    q25 = pmin(q25, median, na.rm = TRUE),
+    q75 = pmax(q75, median, na.rm = TRUE),
+    q975 = pmax(q975, q75, median, na.rm = TRUE),
+    location_name = fips_to_name[location]
+  ) %>%
+  filter(!is.na(location_name))
+
+# Available models
+all_models <- sort(unique(forecast_summary$model))
+
+# Model colors
+model_colors <- c(
+  "AdaptiveEnsemble" = "#cc5200",
+  "AdaptiveEnsemble-hedge" = "#006d77",
+  "AdaptiveEnsemble-hedge-test" = "#264653",
+  "AdaptiveEnsemble-hedge-test-backtest" = "#2a9d8f",
+  "AdaptiveEnsemble-meta" = "#9b2226",
+  "ARIMA" = "#1f77b4",
+  "SVM" = "#2ca02c",
+  "LGBM-blended" = "#9467bd",
+  "LGBM-bounded" = "#e377c2",
+  "LGBM-bounded-wide-1" = "#8c564b",
+  "LGBM-bounded-wide-2" = "#17becf",
+  "LGBM-bounded-wide-3" = "#bcbd22",
+  "LGBM-bounded-wide-4" = "#7f7f7f",
+  "LGBM-bounded-wide-4-ne" = "#ff7f0e",
+  "LGBM-bounded-wide-5" = "#d62728"
+)
+model_colors[TEST_JOINT_MODEL] <- "#1d3557"
+model_colors[paste0(TEST_JOINT_MODEL, "-backtest")] <- "#457b9d"
+model_colors[paste0(KNN_TEST_MODEL, "-backtest")] <- "#2f4f4f"
+
+# Fill colors (lighter versions for ribbons)
+model_fills <- c(
+  "AdaptiveEnsemble" = "#ff944d",
+  "AdaptiveEnsemble-hedge" = "#83c5be",
+  "AdaptiveEnsemble-hedge-test" = "#5f9ea0",
+  "AdaptiveEnsemble-hedge-test-backtest" = "#7ec8bd",
+  "AdaptiveEnsemble-meta" = "#e09f9a",
+  "ARIMA" = "#7fbfff",
+  "SVM" = "#90ee90",
+  "LGBM-blended" = "#c9b3d9",
+  "LGBM-bounded" = "#f0b8d0",
+  "LGBM-bounded-wide-1" = "#c49a91",
+  "LGBM-bounded-wide-2" = "#9edae5",
+  "LGBM-bounded-wide-3" = "#dbdb8d",
+  "LGBM-bounded-wide-4" = "#c7c7c7",
+  "LGBM-bounded-wide-4-ne" = "#ffbb78",
+  "LGBM-bounded-wide-5" = "#ff9896"
+)
+model_fills[TEST_JOINT_MODEL] <- "#8fb3e8"
+model_fills[paste0(TEST_JOINT_MODEL, "-backtest")] <- "#a9c6ea"
+model_fills[paste0(KNN_TEST_MODEL, "-backtest")] <- "#9fb7b9"
+```
+
+Sidebar {.sidebar}
+=====================================
+
+```{r}
+# Date selector with backward/forward navigation
+h4("Forecast Date")
+
+selectInput(
+  "forecast_date",
+  NULL,
+  choices = date_choices,
+  selected = latest_date
+)
+
+# Navigation buttons
+fluidRow(
+  column(6, actionButton("prev_date", "<< Prev", width = "100%")),
+  column(6, actionButton("next_date", "Next >>", width = "100%"))
+)
+
+# Update date on button clicks
+observeEvent(input$prev_date, {
+  current_idx <- which(all_forecast_dates == input$forecast_date)
+  if (current_idx < length(all_forecast_dates)) {
+    updateSelectInput(session, "forecast_date", selected = all_forecast_dates[current_idx + 1])
+  }
+})
+
+observeEvent(input$next_date, {
+  current_idx <- which(all_forecast_dates == input$forecast_date)
+  if (current_idx > 1) {
+    updateSelectInput(session, "forecast_date", selected = all_forecast_dates[current_idx - 1])
+  }
+})
+
+hr()
+
+checkboxGroupInput(
+  "models",
+  "Select Models:",
+  choices = all_models,
+  selected = all_models[1:min(3, length(all_models))]
+)
+
+hr()
+
+selectizeInput(
+  "states",
+  "Select States:",
+  choices = all_states,
+  selected = NULL,
+  multiple = TRUE,
+  options = list(
+    placeholder = "All states (click to filter)",
+    plugins = list('remove_button')
+  )
+)
+
+hr()
+
+checkboxInput("show_95ci", "Show 95% CI", value = TRUE)
+checkboxInput("show_50ci", "Show 50% CI", value = TRUE)
+checkboxInput("show_median", "Show Median", value = TRUE)
+
+hr()
+
+p("Black line = Ground Truth")
+p(paste("Dates available:", length(all_forecast_dates)))
+p("Generated:", format(Sys.Date(), "%Y-%m-%d"))
+p(paste("Models found:", length(all_models)))
+```
+
+State Forecasts
+=====================================
+
+Row
+-------------------------------------
+
+```{r}
+renderPlot({
+  req(input$models, input$forecast_date)
+
+  # Filter to selected models and forecast date, exclude US and PR
+  fc_data <- forecast_summary %>%
+    filter(model %in% input$models,
+           forecast_date == input$forecast_date,
+           !location %in% c('US', '72'))
+
+  actuals <- actual_data %>% filter(!location %in% c('US', '72'))
+
+  # Apply state filter if any states are selected
+  if (!is.null(input$states) && length(input$states) > 0) {
+    fc_data <- fc_data %>% filter(location_name %in% input$states)
+    actuals <- actuals %>% filter(location_name %in% input$states)
+  }
+
+  # Determine number of columns based on number of states
+  n_states <- length(unique(fc_data$location_name))
+  if (n_states == 0) n_states <- 1
+  ncols <- if (n_states == 1) 1 else if (n_states <= 4) 2 else if (n_states <= 9) 3 else if (n_states <= 16) 4 else 6
+
+  p <- ggplot() +
+    geom_line(data = actuals, aes(x = date, y = actual_value), color = 'black', linewidth = 0.5)
+
+  # Use ribbons for CI bands (connected across horizons)
+  if (input$show_95ci && nrow(fc_data) > 0) {
+    p <- p + geom_ribbon(
+      data = fc_data,
+      aes(x = target_end_date, ymin = q025, ymax = q975, fill = model, group = model),
+      alpha = 0.2
+    )
+  }
+
+  if (input$show_50ci && nrow(fc_data) > 0) {
+    p <- p + geom_ribbon(
+      data = fc_data,
+      aes(x = target_end_date, ymin = q25, ymax = q75, fill = model, group = model),
+      alpha = 0.35
+    )
+  }
+
+  if (input$show_median && nrow(fc_data) > 0) {
+    p <- p + geom_line(
+      data = fc_data,
+      aes(x = target_end_date, y = median, color = model, group = model),
+      linewidth = 0.6
+    ) +
+    geom_point(
+      data = fc_data,
+      aes(x = target_end_date, y = median, color = model),
+      size = 1.5
+    )
+  }
+
+  # Add vertical reference line at forecast date
+  ref_date <- as.Date(format_date_display(input$forecast_date))
+
+  # Adjust text size based on number of facets
+  base_size <- if (n_states <= 4) 12 else if (n_states <= 9) 11 else 10
+  strip_size <- if (n_states <= 4) 11 else if (n_states <= 9) 9 else 8
+
+  p + facet_wrap(~ location_name, scales = 'free_y', ncol = ncols) +
+    geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray50", alpha = 0.7) +
+    scale_color_manual(values = model_colors, drop = TRUE) +
+    scale_fill_manual(values = model_fills, drop = TRUE) +
+    theme_bw(base_size = base_size) +
+    theme(
+      legend.position = "bottom",
+      strip.text = element_text(size = strip_size),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.y = element_text(size = 9)
+    ) +
+    labs(
+      title = paste0("Prospective Forecasts (", format_date_display(input$forecast_date), ") - All Horizons"),
+      subtitle = if (is.null(input$states) || length(input$states) == 0)
+        "Bands show uncertainty across horizons 1-4 weeks ahead (all states). Dashed line = forecast date."
+        else paste0("Selected: ", paste(input$states, collapse = ", "), ". Dashed line = forecast date."),
+      x = "Date",
+      y = "Weekly Hospitalizations",
+      color = "Model",
+      fill = "Model"
+    )
+}, height = function() {
+  # Dynamic height based on number of states
+  n_states <- if (is.null(input$states) || length(input$states) == 0) 50 else length(input$states)
+  if (n_states == 1) 400 else if (n_states <= 4) 500 else if (n_states <= 9) 700 else if (n_states <= 16) 850 else 1000
+})
+```
+
+US National
+=====================================
+
+Row {data-height=600}
+-------------------------------------
+
+```{r}
+renderPlot({
+  req(input$models, input$forecast_date)
+
+  fc_data <- forecast_summary %>%
+    filter(location == 'US',
+           model %in% input$models,
+           forecast_date == input$forecast_date)
+
+  actuals <- actual_data %>% filter(location == 'US')
+
+  p <- ggplot() +
+    geom_line(data = actuals, aes(x = date, y = actual_value), color = 'black', linewidth = 0.7)
+
+  if (input$show_95ci && nrow(fc_data) > 0) {
+    p <- p + geom_ribbon(
+      data = fc_data,
+      aes(x = target_end_date, ymin = q025, ymax = q975, fill = model, group = model),
+      alpha = 0.2
+    )
+  }
+
+  if (input$show_50ci && nrow(fc_data) > 0) {
+    p <- p + geom_ribbon(
+      data = fc_data,
+      aes(x = target_end_date, ymin = q25, ymax = q75, fill = model, group = model),
+      alpha = 0.35
+    )
+  }
+
+  if (input$show_median && nrow(fc_data) > 0) {
+    p <- p + geom_line(
+      data = fc_data,
+      aes(x = target_end_date, y = median, color = model, group = model),
+      linewidth = 0.8
+    ) +
+    geom_point(
+      data = fc_data,
+      aes(x = target_end_date, y = median, color = model),
+      size = 2.5
+    )
+  }
+
+  # Add vertical reference line at forecast date
+  ref_date <- as.Date(format_date_display(input$forecast_date))
+
+  p + geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray50", alpha = 0.7) +
+    scale_color_manual(values = model_colors, drop = TRUE) +
+    scale_fill_manual(values = model_fills, drop = TRUE) +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "bottom") +
+    labs(
+      title = paste0("US National Prospective Forecasts (", format_date_display(input$forecast_date), ")"),
+      subtitle = "All horizons (1-4 weeks ahead) on same plot. Dashed line = forecast date.",
+      x = "Date",
+      y = "Weekly Hospitalizations",
+      color = "Model",
+      fill = "Model"
+    )
+}, height = 500)
+```
+
+Puerto Rico
+=====================================
+
+Row {data-height=600}
+-------------------------------------
+
+```{r}
+renderPlot({
+  req(input$models, input$forecast_date)
+
+  fc_data <- forecast_summary %>%
+    filter(location == '72',
+           model %in% input$models,
+           forecast_date == input$forecast_date)
+
+  actuals <- actual_data %>% filter(location == '72')
+
+  p <- ggplot() +
+    geom_line(data = actuals, aes(x = date, y = actual_value), color = 'black', linewidth = 0.7)
+
+  if (input$show_95ci && nrow(fc_data) > 0) {
+    p <- p + geom_ribbon(
+      data = fc_data,
+      aes(x = target_end_date, ymin = q025, ymax = q975, fill = model, group = model),
+      alpha = 0.2
+    )
+  }
+
+  if (input$show_50ci && nrow(fc_data) > 0) {
+    p <- p + geom_ribbon(
+      data = fc_data,
+      aes(x = target_end_date, ymin = q25, ymax = q75, fill = model, group = model),
+      alpha = 0.35
+    )
+  }
+
+  if (input$show_median && nrow(fc_data) > 0) {
+    p <- p + geom_line(
+      data = fc_data,
+      aes(x = target_end_date, y = median, color = model, group = model),
+      linewidth = 0.8
+    ) +
+    geom_point(
+      data = fc_data,
+      aes(x = target_end_date, y = median, color = model),
+      size = 2.5
+    )
+  }
+
+  # Add vertical reference line at forecast date
+  ref_date <- as.Date(format_date_display(input$forecast_date))
+
+  p + geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray50", alpha = 0.7) +
+    scale_color_manual(values = model_colors, drop = TRUE) +
+    scale_fill_manual(values = model_fills, drop = TRUE) +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "bottom") +
+    labs(
+      title = paste0("Puerto Rico Prospective Forecasts (", format_date_display(input$forecast_date), ")"),
+      subtitle = "All horizons (1-4 weeks ahead) on same plot. Dashed line = forecast date.",
+      x = "Date",
+      y = "Weekly Hospitalizations",
+      color = "Model",
+      fill = "Model"
+    )
+}, height = 500)
+```

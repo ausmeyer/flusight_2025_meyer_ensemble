@@ -1,0 +1,610 @@
+---
+title: "Backtest Evaluation: Adaptive Ensemble vs Base Models"
+subtitle: "Evaluation of Linear Pooling Ensemble (Backtest Loop)"
+author: "Pipeline Evaluation"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    code_folding: hide
+    fig_width: 14
+    fig_height: 8
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 14,
+  fig.height = 8
+)
+
+library(dplyr)
+library(readr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(DT)
+library(scoringutils)
+library(hubUtils)
+library(hubData)
+
+log_shift <- function(x, offset = 1) {
+  log(x + offset)
+}
+
+summarise_relative <- function(scores, by_cols, metric, baseline) {
+  by_rel <- setdiff(by_cols, "model")
+  scores_with_skill <- scoringutils::add_relative_skill(
+    scores,
+    compare = "model",
+    metric = metric,
+    baseline = baseline,
+    by = by_rel
+  )
+  summary <- scoringutils::summarise_scores(scores_with_skill, by = by_cols)
+  scaled_col <- paste0(metric, "_scaled_relative_skill")
+  if (scaled_col %in% names(summary)) {
+    summary <- summary %>% rename(scaled_rel_skill = !!rlang::sym(scaled_col))
+  }
+  summary
+}
+
+render_table <- function(df, caption_text) {
+  df <- as.data.frame(df)
+  numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+  float_cols <- numeric_cols[vapply(
+    df[numeric_cols],
+    function(x) {
+      x_num <- suppressWarnings(as.numeric(x))
+      x_num <- x_num[!is.na(x_num)]
+      if (length(x_num) == 0) {
+        return(FALSE)
+      }
+      any(abs(x_num - round(x_num)) > 1e-9)
+    },
+    logical(1)
+  )]
+  table <- DT::datatable(
+    df,
+    rownames = FALSE,
+    caption = caption_text,
+    options = list(pageLength = 10, autoWidth = TRUE)
+  )
+  if (length(float_cols) > 0) {
+    table <- DT::formatRound(table, columns = float_cols, digits = 2)
+  }
+  table
+}
+```
+
+Generated on: `r Sys.time()`
+
+# Overview
+
+This report evaluates the performance of the **Adaptive Ensemble** generated via the retrospective backtest loop (Linear Pooling) against the retrospective base models and the FluSight baseline using Reich Lab scoring conventions.
+
+```{r load-data}
+hub_path <- path.expand("~/My Drive/Research/Faculty/SantillanaLab/FluSight-forecast-hub")
+
+if (dir.exists(file.path(getwd(), "forecasts")) && dir.exists(file.path(getwd(), "joint_knn3_pool_test"))) {
+  project_root <- normalizePath(getwd())
+} else if (dir.exists(file.path(getwd(), "..", "forecasts")) && dir.exists(file.path(getwd(), "..", "joint_knn3_pool_test"))) {
+  project_root <- normalizePath(file.path(getwd(), ".."))
+} else if (dir.exists(file.path(getwd(), "..", "..", "forecasts")) && dir.exists(file.path(getwd(), "..", "..", "joint_knn3_pool_test"))) {
+  project_root <- normalizePath(file.path(getwd(), "..", ".."))
+} else {
+  stop("Could not infer project_root containing forecasts/ and joint_knn3_pool_test/")
+}
+
+prospective_dir <- file.path(project_root, "forecasts", "prospective")
+ensemble_dir <- file.path(project_root, "forecasts", "retrospective", "ensemble")
+ensemble_shrink_dir <- file.path(project_root, "forecasts", "retrospective", "ensemble_shrink")
+ensemble_loc_dir <- file.path(project_root, "forecasts", "retrospective", "ensemble_loc")
+ensemble_knn_dir <- file.path(project_root, "forecasts", "retrospective", "ensemble_knn")
+ensemble_meta_dir <- file.path(project_root, "forecasts", "retrospective", "ensemble_meta")
+ensemble_gate_dir <- file.path(project_root, "forecasts", "retrospective", "ensemble_gate")
+ensemble_robust_dir <- file.path(project_root, "forecasts", "retrospective", "ensemble_robust")
+ensemble_tier_dir <- file.path(project_root, "forecasts", "retrospective", "ensemble_tier")
+joint_backtest_dir <- file.path(project_root, "joint_knn3_pool_test", "outputs")
+season_start_date <- as.Date("2025-11-01")
+recent_weeks <- 4
+include_us <- FALSE
+stopifnot(dir.exists(hub_path))
+stopifnot(dir.exists(prospective_dir))
+
+hub_con <- connect_hub(hub_path)
+hub_forecasts <- hub_con |>
+  dplyr::filter(
+    output_type == "quantile",
+    reference_date >= season_start_date,
+    target == "wk inc flu hosp"
+  ) |>
+  dplyr::collect() |>
+  as_model_out_tbl() |>
+  dplyr::mutate(
+    reference_date = as.Date(reference_date),
+    target_end_date = as.Date(target_end_date)
+  )
+
+parse_horizon_from_file <- function(path) {
+  file_name <- basename(path)
+  match_pos <- regexpr("_h([1-4])", file_name, perl = TRUE)
+  if (match_pos[1] == -1) {
+    return(NA_integer_)
+  }
+  as.integer(substr(file_name, match_pos[1] + 2, match_pos[1] + 2))
+}
+
+parse_model_from_file <- function(path) {
+  file_name <- basename(path)
+  sub("_h[1-4]_prospective_[0-9]{8}\\.csv$", "", file_name)
+}
+
+load_local_forecasts <- function(model_id, dir_path, file_pattern, season_start) {
+  empty <- tibble::tibble(
+    reference_date = as.Date(character()),
+    target = character(),
+    horizon = integer(),
+    target_end_date = as.Date(character()),
+    location = character(),
+    output_type = character(),
+    output_type_id = character(),
+    value = double(),
+    model_id = character()
+  )
+  if (!dir.exists(dir_path)) {
+    return(empty)
+  }
+  files <- list.files(dir_path, pattern = file_pattern, full.names = TRUE)
+  if (length(files) == 0) {
+    return(empty)
+  }
+  out <- lapply(files, function(file_path) {
+    horizon_file <- parse_horizon_from_file(file_path)
+    if (is.na(horizon_file)) {
+      stop("Unable to parse horizon from filename: ", file_path)
+    }
+    df <- readr::read_csv(file_path, show_col_types = FALSE)
+    df %>%
+      filter(output_type == "quantile") %>%
+      mutate(
+        reference_date = as.Date(reference_date) + 7,
+        target_end_date = as.Date(target_end_date),
+        horizon = horizon_file - 1,
+        location = as.character(location),
+        location = ifelse(grepl("^[0-9]+$", location),
+                          sprintf("%02d", as.integer(location)),
+                          location),
+        output_type_id = as.character(output_type_id),
+        model_id = model_id
+      ) %>%
+      select(reference_date, target, horizon, target_end_date, location,
+             output_type, output_type_id, value, model_id)
+  })
+  bind_rows(out) %>%
+    filter(reference_date >= season_start)
+}
+
+load_local_forecasts_from_filename <- function(dir_path, file_pattern, season_start) {
+  empty <- tibble::tibble(
+    reference_date = as.Date(character()),
+    target = character(),
+    horizon = integer(),
+    target_end_date = as.Date(character()),
+    location = character(),
+    output_type = character(),
+    output_type_id = character(),
+    value = double(),
+    model_id = character()
+  )
+  if (!dir.exists(dir_path)) {
+    return(empty)
+  }
+  files <- list.files(dir_path, pattern = file_pattern, full.names = TRUE)
+  if (length(files) == 0) {
+    return(empty)
+  }
+  out <- lapply(files, function(file_path) {
+    horizon_file <- parse_horizon_from_file(file_path)
+    if (is.na(horizon_file)) {
+      stop("Unable to parse horizon from filename: ", file_path)
+    }
+    model_id <- parse_model_from_file(file_path)
+    df <- readr::read_csv(file_path, show_col_types = FALSE)
+    df %>%
+      filter(output_type == "quantile") %>%
+      mutate(
+        reference_date = as.Date(reference_date) + 7,
+        target_end_date = as.Date(target_end_date),
+        horizon = horizon_file - 1,
+        location = as.character(location),
+        location = ifelse(grepl("^[0-9]+$", location),
+                          sprintf("%02d", as.integer(location)),
+                          location),
+        output_type_id = as.character(output_type_id),
+        model_id = model_id
+      ) %>%
+      select(reference_date, target, horizon, target_end_date, location,
+             output_type, output_type_id, value, model_id)
+  })
+  bind_rows(out) %>%
+    filter(reference_date >= season_start)
+}
+
+load_backtest_ensemble <- function(dir_path, file_pattern, season_start, model_id,
+                                   reference_shift_days = 0, allowed_refs = NULL,
+                                   latest_only = FALSE) {
+  empty <- tibble::tibble(
+    reference_date = as.Date(character()),
+    target = character(),
+    horizon = integer(),
+    target_end_date = as.Date(character()),
+    location = character(),
+    output_type = character(),
+    output_type_id = character(),
+    value = double(),
+    model_id = character()
+  )
+  if (!dir.exists(dir_path)) {
+    return(empty)
+  }
+  files <- list.files(dir_path, pattern = file_pattern, full.names = TRUE)
+  if (length(files) == 0) {
+    return(empty)
+  }
+  if (latest_only && length(files) > 1) {
+    info <- file.info(files)
+    files <- files[order(info$mtime, decreasing = TRUE)][1]
+    message(sprintf(
+      "Using latest file for %s: %s",
+      model_id, basename(files)
+    ))
+  }
+  out <- lapply(files, function(file_path) {
+    df <- readr::read_csv(file_path, show_col_types = FALSE)
+    df %>%
+      filter(output_type == "quantile") %>%
+      mutate(
+        reference_date = as.Date(reference_date) + reference_shift_days,
+        target_end_date = as.Date(target_end_date),
+        horizon = as.integer(horizon),
+        location = as.character(location),
+        location = ifelse(grepl("^[0-9]+$", location),
+                          sprintf("%02d", as.integer(location)),
+                          location),
+        output_type_id = as.character(output_type_id),
+        model_id = model_id
+      ) %>%
+      select(reference_date, target, horizon, target_end_date, location,
+             output_type, output_type_id, value, model_id)
+  })
+  result <- bind_rows(out) %>%
+    filter(reference_date >= season_start)
+  if (!is.null(allowed_refs)) {
+    result <- result %>% filter(reference_date %in% allowed_refs)
+  }
+  result
+}
+
+local_forecasts <- bind_rows(
+  load_local_forecasts(
+    model_id = "SVM",
+    dir_path = prospective_dir,
+    file_pattern = "^SVM_h[1-4]_prospective_[0-9]{8}\\.csv$",
+    season_start = season_start_date
+  ),
+  load_local_forecasts(
+    model_id = "ARIMA",
+    dir_path = prospective_dir,
+    file_pattern = "^ARIMA_h[1-4]_prospective_[0-9]{8}\\.csv$",
+    season_start = season_start_date
+  ),
+  load_local_forecasts(
+    model_id = "LGBM_blended",
+    dir_path = prospective_dir,
+    file_pattern = "^LGBM-blended_h[1-4]_prospective_[0-9]{8}\\.csv$",
+    season_start = season_start_date
+  ),
+  load_local_forecasts_from_filename(
+    dir_path = prospective_dir,
+    file_pattern = "^TwoStage-FrozenMu-bounded.*_h[1-4]_prospective_[0-9]{8}\\.csv$",
+    season_start = season_start_date
+  )
+) %>%
+  distinct(model_id, reference_date, target, target_end_date, location, horizon,
+           output_type_id, .keep_all = TRUE)
+
+hub_keys <- hub_forecasts %>%
+  mutate(
+    reference_date = as.Date(reference_date),
+    target_end_date = as.Date(target_end_date),
+    horizon = as.integer(horizon),
+    location = as.character(location),
+    location = ifelse(grepl("^[0-9]+$", location),
+                      sprintf("%02d", as.integer(location)),
+                      location)
+  ) %>%
+  select(reference_date, horizon, target_end_date, location) %>%
+  distinct()
+
+allowed_backtest_refs <- sort(unique(hub_keys$reference_date))
+
+adaptive_ensemble_forecasts <- load_backtest_ensemble(
+  dir_path = prospective_dir,
+  file_pattern = "^AdaptiveEnsemble_prospective_[0-9]{8}\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble",
+  reference_shift_days = 0,
+  allowed_refs = NULL
+)
+
+adaptive_backtest_forecasts <- load_backtest_ensemble(
+  dir_path = ensemble_dir,
+  file_pattern = "^AdaptiveEnsemble_retrospective_.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble-backtest",
+  reference_shift_days = 7,
+  allowed_refs = allowed_backtest_refs
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+adaptive_shrink_forecasts <- load_backtest_ensemble(
+  dir_path = ensemble_shrink_dir,
+  file_pattern = "^AdaptiveEnsemble_shrink_retrospective_.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble-shrink",
+  reference_shift_days = 7,
+  allowed_refs = allowed_backtest_refs
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+adaptive_loc_forecasts <- load_backtest_ensemble(
+  dir_path = ensemble_loc_dir,
+  file_pattern = "^AdaptiveEnsemble_loc_retrospective_.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble-loc",
+  reference_shift_days = 7,
+  allowed_refs = allowed_backtest_refs
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+adaptive_knn_forecasts <- load_backtest_ensemble(
+  dir_path = ensemble_knn_dir,
+  file_pattern = "^AdaptiveEnsemble_knn_retrospective_.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble-knn",
+  reference_shift_days = 7,
+  allowed_refs = allowed_backtest_refs
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+adaptive_meta_forecasts <- load_backtest_ensemble(
+  dir_path = ensemble_meta_dir,
+  file_pattern = "^AdaptiveEnsemble_meta_retrospective_.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble-meta",
+  reference_shift_days = 7,
+  allowed_refs = allowed_backtest_refs
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+adaptive_gate_forecasts <- load_backtest_ensemble(
+  dir_path = ensemble_gate_dir,
+  file_pattern = "^AdaptiveEnsemble_gate_retrospective_.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble-gate",
+  reference_shift_days = 7,
+  allowed_refs = allowed_backtest_refs
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+adaptive_robust_forecasts <- load_backtest_ensemble(
+  dir_path = ensemble_robust_dir,
+  file_pattern = "^AdaptiveEnsemble_robust_retrospective_.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble-robust",
+  reference_shift_days = 7,
+  allowed_refs = allowed_backtest_refs
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+adaptive_tier_forecasts <- load_backtest_ensemble(
+  dir_path = ensemble_tier_dir,
+  file_pattern = "^AdaptiveEnsemble_tier_retrospective_.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble-tier",
+  reference_shift_days = 7,
+  allowed_refs = allowed_backtest_refs
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+ensemble_hedge_forecasts <- load_backtest_ensemble(
+  dir_path = file.path(project_root, "forecasts", "retrospective", "ensemble_hedge"),
+  file_pattern = "^AdaptiveEnsemble_hedge_retrospective_.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble-hedge",
+  reference_shift_days = 7,
+  allowed_refs = allowed_backtest_refs
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+ensemble_hedge_test_forecasts <- load_backtest_ensemble(
+  dir_path = file.path(project_root, "joint_knn3_pool_test", "outputs", "ensemble_hedge_retrospective"),
+  file_pattern = "^AdaptiveEnsemble_hedge_retrospective_.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "AdaptiveEnsemble-hedge-test",
+  reference_shift_days = 7,
+  allowed_refs = allowed_backtest_refs
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+joint_twostage_backtest_forecasts <- load_backtest_ensemble(
+  dir_path = joint_backtest_dir,
+  file_pattern = "^backtest_cov.*\\.csv$",
+  season_start = season_start_date,
+  model_id = "JointKNN3Pool-backtest",
+  reference_shift_days = 0,
+  allowed_refs = allowed_backtest_refs,
+  latest_only = TRUE
+) %>%
+  inner_join(hub_keys, by = c("reference_date", "horizon", "target_end_date", "location"))
+
+raw_forecasts <- bind_rows(
+  hub_forecasts,
+  local_forecasts,
+  adaptive_ensemble_forecasts,
+  adaptive_backtest_forecasts,
+  adaptive_shrink_forecasts,
+  adaptive_loc_forecasts,
+  adaptive_knn_forecasts,
+  adaptive_meta_forecasts,
+  adaptive_gate_forecasts,
+  adaptive_robust_forecasts,
+  adaptive_tier_forecasts,
+  ensemble_hedge_forecasts,
+  ensemble_hedge_test_forecasts,
+  joint_twostage_backtest_forecasts
+)
+
+raw_truth <- read_csv(file.path(hub_path, "target-data", "target-hospital-admissions.csv"),
+                      show_col_types = FALSE) |>
+  dplyr::mutate(date = as.Date(date))
+
+```
+
+# Scoring (Reich Lab)
+
+```{r scoring}
+raw_data <- raw_forecasts |>
+  dplyr::filter(horizon > -1) |>
+  dplyr::left_join(
+    raw_truth |>
+      dplyr::select(target_end_date = date, location, location_name, true_value = value),
+    by = c("location", "target_end_date")
+  ) |>
+  dplyr::filter(!is.na(true_value)) |>
+  dplyr::rename(model = model_id, quantile = output_type_id, prediction = value) |>
+  dplyr::mutate(quantile = as.numeric(quantile))
+
+raw_forecast <- scoringutils::as_forecast_quantile(
+  raw_data,
+  forecast_unit = c("model", "reference_date", "target_end_date", "location", "horizon"),
+  observed = "true_value",
+  predicted = "prediction",
+  quantile_level = "quantile"
+)
+raw_scores <- scoringutils::score(raw_forecast)
+
+wis_metric <- if ("interval_score" %in% names(raw_scores)) "interval_score" else "wis"
+
+filter_scores <- function(df) {
+  if (!include_us) {
+    df <- df %>% filter(location != "US")
+  }
+  df
+}
+
+last_eval_sat <- max(as.Date(raw_scores$reference_date), na.rm = TRUE)
+first_eval_sat_recent <- last_eval_sat - weeks(recent_weeks)
+first_eval_sat_season <- season_start_date
+
+recent_scores <- raw_scores %>%
+  filter(reference_date >= first_eval_sat_recent, reference_date <= last_eval_sat) %>%
+  filter_scores()
+
+stopifnot("FluSight-baseline" %in% recent_scores$model)
+
+recent_per_horizon <- summarise_relative(
+  recent_scores,
+  by_cols = c("model", "horizon"),
+  metric = wis_metric,
+  baseline = "FluSight-baseline"
+) %>%
+  left_join(
+    recent_scores %>%
+      group_by(model, horizon) %>%
+      summarise(n_units = sum(!is.na(.data[[wis_metric]])), .groups = "drop"),
+    by = c("model", "horizon")
+  ) %>%
+  rename(relative_wis = scaled_rel_skill) %>%
+  arrange(horizon, is.na(relative_wis), relative_wis)
+
+recent_overall <- summarise_relative(
+  recent_scores,
+  by_cols = c("model"),
+  metric = wis_metric,
+  baseline = "FluSight-baseline"
+) %>%
+  left_join(
+    recent_scores %>%
+      group_by(model) %>%
+      summarise(n_units = sum(!is.na(.data[[wis_metric]])), .groups = "drop"),
+    by = "model"
+  ) %>%
+  rename(relative_wis = scaled_rel_skill) %>%
+  arrange(is.na(relative_wis), relative_wis)
+
+season_scores <- raw_scores %>%
+  filter(reference_date >= first_eval_sat_season, reference_date <= last_eval_sat) %>%
+  filter_scores()
+
+season_per_horizon <- summarise_relative(
+  season_scores,
+  by_cols = c("model", "horizon"),
+  metric = wis_metric,
+  baseline = "FluSight-baseline"
+) %>%
+  left_join(
+    season_scores %>%
+      group_by(model, horizon) %>%
+      summarise(n_units = sum(!is.na(.data[[wis_metric]])), .groups = "drop"),
+    by = c("model", "horizon")
+  ) %>%
+  rename(relative_wis = scaled_rel_skill) %>%
+  arrange(horizon, is.na(relative_wis), relative_wis)
+
+season_overall <- summarise_relative(
+  season_scores,
+  by_cols = c("model"),
+  metric = wis_metric,
+  baseline = "FluSight-baseline"
+) %>%
+  left_join(
+    season_scores %>%
+      group_by(model) %>%
+      summarise(n_units = sum(!is.na(.data[[wis_metric]])), .groups = "drop"),
+    by = "model"
+  ) %>%
+  rename(relative_wis = scaled_rel_skill) %>%
+  arrange(is.na(relative_wis), relative_wis)
+```
+
+## Recent Per-Horizon Results
+
+Recent = reference dates in the last 4 weeks of available submissions: from `r first_eval_sat_recent` through `r last_eval_sat`.
+
+```{r recent-per-horizon-table}
+render_table(recent_per_horizon, "Recent Per-Horizon Relative WIS (Reich Lab scoring)")
+```
+
+## Recent Combined Results
+
+```{r recent-combined-table}
+render_table(recent_overall, "Recent Combined Relative WIS (Reich Lab scoring)")
+```
+
+## Season Per-Horizon Results
+
+```{r season-per-horizon-table}
+render_table(season_per_horizon, "Season Per-Horizon Relative WIS (Reich Lab scoring)")
+```
+
+## Season Combined Results
+
+```{r season-combined-table}
+render_table(season_overall, "Season Combined Relative WIS (Reich Lab scoring)")
+```

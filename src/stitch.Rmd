@@ -389,8 +389,103 @@ df.true.hosp <- read_csv(file_names$old_true_hosp_2) %>%
   select(-'...1', -value, -location, -weekly_rate) %>%
   full_join(df.old.true.hosp)
 
+# Regime calibration settings (two-regime model):
+# legacy = all data before the restart; current = post-restart.
+CURRENT_REGIME_START_DATE <- as.Date("2024-11-01")
+MIN_LEGACY_WEEKS <- 26L
+MIN_CURRENT_WEEKS <- 8L
+MAX_SHIFT_MULTIPLIER <- 2.0
+MAX_SHIFT_LOG <- log(MAX_SHIFT_MULTIPLIER)
+
+# Estimate log-scale state-wise shift mapping legacy regime into current regime.
+compute_regime_shift <- function(
+  df,
+  current_regime_start,
+  min_legacy_weeks,
+  min_current_weeks
+) {
+  with_regime <- df %>%
+    mutate(
+      regime = ifelse(date < current_regime_start, "legacy", "current"),
+      regime = factor(regime, levels = c("legacy", "current")),
+      true_hosp = pmax(as.numeric(true_hosp), 0),
+      proxy_hosp = pmax(as.numeric(proxy_hosp), 0),
+      resid_log = log1p(true_hosp) - log1p(proxy_hosp)
+    ) %>%
+    filter(is.finite(resid_log))
+
+  stats_by_loc <- with_regime %>%
+    group_by(location_name, regime) %>%
+    summarise(offset = median(resid_log, na.rm = TRUE), n = n(), .groups = "drop") %>%
+    tidyr::pivot_wider(
+      names_from = regime,
+      values_from = c(offset, n),
+      values_fill = list(offset = NA_real_, n = 0L),
+      names_expand = TRUE
+    )
+
+  stats_by_loc %>%
+    mutate(
+      has_loc_shift = n_legacy >= min_legacy_weeks &
+        n_current >= min_current_weeks &
+        is.finite(offset_legacy) &
+        is.finite(offset_current),
+      delta_shift = offset_current - offset_legacy,
+      shift_legacy_to_current = ifelse(
+        has_loc_shift,
+        delta_shift,
+        0
+      )
+    ) %>%
+    mutate(
+      shift_legacy_to_current = pmax(pmin(shift_legacy_to_current, MAX_SHIFT_LOG), -MAX_SHIFT_LOG)
+    ) %>%
+    select(
+      location_name,
+      shift_legacy_to_current,
+      n_legacy,
+      n_current
+    )
+}
+
+proxy_series <- predicted.hosp %>%
+  left_join(df.ed %>% select(date, location_name, scale_factor), by = c("date", "location_name")) %>%
+  mutate(scale_factor = ifelse(is.na(scale_factor), 1, scale_factor)) %>%
+  inner_join(population, by = "location_name") %>%
+  mutate(proxy_hosp = round(pmax(pred_hosp * population / 100000 * scale_factor, 0))) %>%
+  select(date, location_name, proxy_hosp)
+
+truth_series <- df.true.hosp %>%
+  transmute(date = as.Date(date), location_name, true_hosp = pmax(as.numeric(true_hosp), 0)) %>%
+  full_join(
+    most_recent_flu %>%
+      transmute(date = as.Date(date), location_name, true_hosp_recent = pmax(as.numeric(total_hosp), 0)),
+    by = c("date", "location_name")
+  ) %>%
+  mutate(true_hosp = coalesce(true_hosp_recent, true_hosp)) %>%
+  select(date, location_name, true_hosp)
+
+regime_factors <- truth_series %>%
+  inner_join(proxy_series, by = c("date", "location_name")) %>%
+  compute_regime_shift(
+    current_regime_start = CURRENT_REGIME_START_DATE,
+    min_legacy_weeks = MIN_LEGACY_WEEKS,
+    min_current_weeks = MIN_CURRENT_WEEKS
+  )
+
+# Quick calibration diagnostics for sanity checks by location.
+regime_factors %>%
+  mutate(
+    mult_legacy_to_current = round(exp(shift_legacy_to_current), 3),
+    abs_shift = abs(shift_legacy_to_current)
+  ) %>%
+  arrange(desc(abs_shift)) %>%
+  select(location_name, n_legacy, n_current, mult_legacy_to_current) %>%
+  head(15) %>%
+  print()
+
 # Combine predicted and true hospitalization data
-df.combined.hosp <- predicted.hosp %>% 
+df.combined.hosp.raw <- predicted.hosp %>% 
   filter(date <= mdy('06/30/2019')) %>%
   mutate(date = date + days(728)) %>%
   full_join(df.true.hosp, by = c('date', 'location_name')) %>%
@@ -410,6 +505,20 @@ df.combined.hosp <- predicted.hosp %>%
   mutate(total_hosp = interpolate_internal(total_hosp, as.numeric(date))) |>
   mutate(total_hosp = ifelse(total_hosp < 0, 0, total_hosp)) |>
   ungroup()
+
+df.combined.hosp <- df.combined.hosp.raw %>%
+  left_join(regime_factors %>% select(location_name, shift_legacy_to_current), by = "location_name") %>%
+  mutate(
+    shift_legacy_to_current = coalesce(shift_legacy_to_current, 0)
+  ) %>%
+  mutate(
+    total_hosp = ifelse(
+      date < CURRENT_REGIME_START_DATE,
+      round(pmax(expm1(log1p(pmax(total_hosp, 0)) + shift_legacy_to_current), 0)),
+      total_hosp
+    )
+  ) %>%
+  select(date, location_name, total_hosp)
 
 # Sanity check for date differences
 sanity <- df.combined.hosp %>% 
