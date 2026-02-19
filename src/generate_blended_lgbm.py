@@ -588,7 +588,11 @@ class BlendedLGBMGenerator:
         df = pd.DataFrame(cdc_records)
         col_order = ['reference_date', 'horizon', 'target', 'target_end_date',
                      'location', 'output_type', 'output_type_id', 'value']
-        df = df[col_order]
+        if df.empty:
+            # Keep schema stable when an incremental slice has no newly-scorable anchors.
+            df = pd.DataFrame(columns=col_order)
+        else:
+            df = df[col_order]
 
         output_file = os.path.join(output_dir, f'LGBM-blended_h{horizon}_forecasts.csv')
         df.to_csv(output_file, index=False)

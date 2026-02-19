@@ -301,6 +301,14 @@ local_forecasts <- bind_rows(
     model_id = "JointTwoStagePool",
     reference_shift_days = 0,
     allowed_refs = NULL
+  ),
+  load_backtest_ensemble(
+    dir_path = file.path(project_root, "forecasts", "retrospective", "joint_twostage_pool"),
+    file_pattern = "^JointTwoStagePool_backtest_.*\\.csv$",
+    season_start = season_start_date,
+    model_id = "JointTwoStagePool",
+    reference_shift_days = 7,
+    allowed_refs = NULL
   )
 ) %>%
   distinct(model_id, reference_date, target, target_end_date, location, horizon,
