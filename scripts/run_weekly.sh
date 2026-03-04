@@ -4,8 +4,8 @@ set -euo pipefail
 # Weekly pipeline runner
 # - Renders stitch.Rmd (auto-dated)
 # - Detects latest stitched file and sets cutoff = last_date - 8 weeks
-# - Runs retrospective generators (ARIMA, LGBM, SVM)
-# - Runs prospective generators (ARIMA, LGBM, SVM)
+# - Runs retrospective generators (ARIMA, LGBM)
+# - Runs prospective generators (ARIMA, LGBM)
 # - Builds adaptive ensemble from last 4 weeks weights and current prospective
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,7 +15,6 @@ cd "$ROOT_DIR"
 # --lookback <N>             Number of reference weeks for weighting (default 6)
 # --history <N>              Number of retrospective weeks to consider (default 8)
 # --include-arima <t/f>      Include ARIMA in ensemble (default true)
-# --include-svm <t/f>        Include SVM in ensemble (default true)
 # --include-lgbm-blended <t/f>  Include LGBM blended in ensemble (default true)
 # --include-lgbm-bounded <t/f>  Include LGBM bounded in ensemble (default true)
 # --include-lgbm-bounded-wide-N <t/f>  Include LGBM bounded wide variant N in ensemble (N=1-5)
@@ -23,7 +22,7 @@ cd "$ROOT_DIR"
 # --include-joint-twostage <t/f> Include joint two-stage pooled model in ensembles (default true)
 # --joint-warmup-weeks <N>       Joint retrospective warmup weeks before as-of (default auto minimum)
 # --include-meta-ensemble <t/f>  Run adaptive meta ensemble (default false)
-# --incremental-retrospective <t/f>  Reuse prior retrospective cache and only append new anchors (default false)
+# --incremental-retrospective <t/f>  Reuse prior retrospective cache and only append new anchors (default true)
 # --reuse-retrospective-cache        Convenience switch; same as --incremental-retrospective true
 # --full-retrospective-rebuild       Convenience switch; same as --incremental-retrospective false
 # --start-at <step>                  Resume at a specific step:
@@ -33,7 +32,6 @@ cd "$ROOT_DIR"
 ENSEMBLE_LOOKBACK_WEEKS=""
 ENSEMBLE_HISTORY_WEEKS=""
 ENSEMBLE_INCLUDE_ARIMA=""
-ENSEMBLE_INCLUDE_SVM="false"  # SKIPPED this week
 ENSEMBLE_INCLUDE_LGBM_BLENDED=""
 ENSEMBLE_INCLUDE_LGBM_BOUNDED=""
 ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1=""
@@ -45,7 +43,7 @@ ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_5=""
 ENSEMBLE_INCLUDE_JOINT_TWOSTAGE="true"
 JOINT_WARMUP_WEEKS=""
 ENSEMBLE_INCLUDE_META="false"
-INCREMENTAL_RETROSPECTIVE="false"
+INCREMENTAL_RETROSPECTIVE="true"
 START_AT_STEP="stitch"
 
 while [[ $# -gt 0 ]]; do
@@ -56,8 +54,6 @@ while [[ $# -gt 0 ]]; do
       ENSEMBLE_HISTORY_WEEKS="$2"; shift 2;;
     --include-arima)
       ENSEMBLE_INCLUDE_ARIMA="$2"; shift 2;;
-    --include-svm)
-      ENSEMBLE_INCLUDE_SVM="$2"; shift 2;;
     --include-lgbm-blended)
       ENSEMBLE_INCLUDE_LGBM_BLENDED="$2"; shift 2;;
     --include-lgbm-bounded)
@@ -447,7 +443,6 @@ mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_3
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_4
 mkdir -p forecasts/retrospective/lgbm_enhanced_t10_bounded_wide_5
 mkdir -p forecasts/retrospective/lgbm_t10_bounded_wide_4
-mkdir -p forecasts/retrospective/svm_t100
 mkdir -p forecasts/retrospective/joint_twostage_pool
 mkdir -p forecasts/prospective
 
@@ -591,26 +586,11 @@ else
   echo "==> Skipping retrospective models (--start-at $SHOULD_RUN_FROM_STEP)"
 fi
 
-# SKIPPED this week
-# echo "==> Retrospective SVM (h=1..4)"
-# for H in 1 2 3 4; do
-#   python src/generate_retro_svm.py \
-#     --hyperparams models/svm_t100/svm_hyperparameters_h${H}_t100.pkl \
-#     --data-file "$STITCHED" \
-#     --cut-off "$CUTOFF_SEASON" \
-#     --output forecasts/retrospective/svm_t100 \
-#     --max-weeks 0 || true
-# done
-
 if should_run_step "prospective"; then
   echo "==> Prospective ARIMA (h=1..4)"
   python src/generate_prosp_arima.py --data-file "$STITCHED" \
     --residuals-dir forecasts/retrospective/arima \
     --output forecasts/prospective
-
-  # SKIPPED this week
-  # echo "==> Prospective SVM (h=1..4)"
-  # python src/generate_prosp_svm.py --data-file "$STITCHED" --models models/svm_t100 --output forecasts/prospective
 
   echo "==> Prospective Blended LGBM (0.5*t10 + 0.5*t100 -> plain conformal CIs)"
   python src/generate_blended_lgbm.py \
@@ -787,7 +767,6 @@ if should_run_step "ensemble"; then
   if [[ -n "$ENSEMBLE_LOOKBACK_WEEKS" ]]; then AE_ARGS+=(--lookback-weeks "$ENSEMBLE_LOOKBACK_WEEKS"); fi
   if [[ -n "$ENSEMBLE_HISTORY_WEEKS" ]]; then AE_ARGS+=(--history-weeks "$ENSEMBLE_HISTORY_WEEKS"); fi
   if [[ -n "$ENSEMBLE_INCLUDE_ARIMA" ]]; then AE_ARGS+=(--include-arima "$ENSEMBLE_INCLUDE_ARIMA"); fi
-  if [[ -n "$ENSEMBLE_INCLUDE_SVM" ]]; then AE_ARGS+=(--include-svm "$ENSEMBLE_INCLUDE_SVM"); fi
   if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BLENDED" ]]; then AE_ARGS+=(--include-lgbm-blended "$ENSEMBLE_INCLUDE_LGBM_BLENDED"); fi
   if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED" ]]; then AE_ARGS+=(--include-lgbm-bounded "$ENSEMBLE_INCLUDE_LGBM_BOUNDED"); fi
   if [[ -n "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1" ]]; then AE_ARGS+=(--include-lgbm-bounded-wide-1 "$ENSEMBLE_INCLUDE_LGBM_BOUNDED_WIDE_1"); fi
